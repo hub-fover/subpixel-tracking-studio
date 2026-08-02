@@ -34,6 +34,15 @@ describe("multi-point primitives", () => {
     expect(result.tracks[0].state).toBe("suspect");
   });
 
+  it("preserves descriptor distance on a gated natural track", () => {
+    const seed: PointSeed = { pointId: "p-001", click: { x: 10, y: 10 }, snapped: { x: 10, y: 10 }, roi: { x: 4, y: 4, width: 13, height: 13 }, groupId: "natural", candidateScore: .9, model: "natural-keypoint" };
+    const tracker = createMultiPointTracker([seed]); tracker.initialize();
+    const result = tracker.process([{ pointId: seed.pointId, predicted: seed.snapped, refined: { x: 42, y: 35 }, confidence: .9, residual: .1, relocationMethod: "sift", metrics: { forwardBackwardError: .4, ncc: .82, epipolarError: 1, loweRatio: .6, descriptorDistance: 18 } }]);
+    expect(result.tracks[0].pointId).toBe(seed.pointId);
+    expect(result.tracks[0].state).toBe("valid");
+    expect(result.tracks[0].descriptorDistance).toBe(18);
+  });
+
   it("propagates points through a local affine fit from reliable anchors", () => {
     const result = applyLocalAffine({ x: 10, y: 20 }, [
       { reference: { x: 0, y: 0 }, current: { x: 5, y: 7 }, reliable: true },

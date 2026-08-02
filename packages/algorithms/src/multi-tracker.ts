@@ -8,7 +8,7 @@ export type MultiPointObservation = {
   refined?: { x: number; y: number };
   confidence: number;
   residual: number;
-  metrics?: { forwardBackwardError?: number; ncc?: number; epipolarError?: number; loweRatio?: number };
+  metrics?: { forwardBackwardError?: number; ncc?: number; epipolarError?: number; loweRatio?: number; descriptorDistance?: number };
   relocationMethod?: MultiPointTrack["relocationMethod"];
 };
 
@@ -47,7 +47,7 @@ export function createMultiPointTracker(seeds: PointSeed[], options: { pauseLost
         state = naturalGate && observation.confidence >= 0.35 ? "valid" : "suspect";
       }
       if (state === "valid") previous.set(seed.pointId, refined);
-      return { pointId: seed.pointId, frame, timestampMs, predicted, refined, model: seed.model, confidence: observation?.confidence ?? 0, residual: observation?.residual ?? Infinity, flowErrorForwardBackward: observation?.metrics?.forwardBackwardError ?? null, ncc: observation?.metrics?.ncc ?? null, descriptorDistance: null, epipolarError: observation?.metrics?.epipolarError ?? null, state, relocationMethod: observation?.relocationMethod ?? "none" } satisfies MultiPointTrack;
+      return { pointId: seed.pointId, frame, timestampMs, predicted, refined, model: seed.model, confidence: observation?.confidence ?? 0, residual: observation?.residual ?? Infinity, flowErrorForwardBackward: observation?.metrics?.forwardBackwardError ?? null, ncc: observation?.metrics?.ncc ?? null, descriptorDistance: observation?.metrics?.descriptorDistance ?? null, epipolarError: observation?.metrics?.epipolarError ?? null, state, relocationMethod: observation?.relocationMethod ?? "none" } satisfies MultiPointTrack;
     });
     const lost = tracks.filter(track => track.state === "lost").length;
     const registrationPause = registration && registration.accepted === false ? shouldPauseMultiPoint({ total: seeds.length, lost, matchCount: registration.matchCount, inlierRatio: registration.inlierRatio, medianReprojectionError: registration.medianReprojectionError }) : false;
