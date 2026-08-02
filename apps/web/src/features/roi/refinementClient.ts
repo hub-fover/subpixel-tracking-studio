@@ -7,6 +7,8 @@ type RefinementRequest = {
   sourceSize: { width: number; height: number };
 };
 
+const apiBase = import.meta.env.VITE_API_BASE ?? "";
+
 export async function refineFeature(
   request: RefinementRequest,
   signal?: AbortSignal,
@@ -21,7 +23,7 @@ export async function refineFeature(
   form.set("roi_height", String(Math.round(request.roi.height)));
   form.set("source_width", String(request.sourceSize.width));
   form.set("source_height", String(request.sourceSize.height));
-  const response = await fetcher("/api/features/refine", { method: "POST", body: form, signal });
+  const response = await fetcher(`${apiBase}/api/features/refine`, { method: "POST", body: form, signal });
   if (!response.ok) {
     const detail = await response.json().catch(() => undefined);
     throw Object.assign(new Error(detail?.detail?.code ?? `refinement.http-${response.status}`), {

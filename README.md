@@ -4,6 +4,8 @@
 
 在线仓库：[github.com/hub-fover/subpixel-tracking-studio](https://github.com/hub-fover/subpixel-tracking-studio)
 
+手机或桌面浏览器直接打开：[GitHub Pages 工作台](https://hub-fover.github.io/subpixel-tracking-studio/)
+
 ## 功能
 
 - 基于原始图像像素的 ROI 框选、调整、确认和删除。
@@ -44,6 +46,8 @@ python -m venv .venv
 ### Codespaces
 
 [一键打开 GitHub Codespace](https://github.com/codespaces/new?repo=hub-fover/subpixel-tracking-studio)
+
+GitHub Pages 当前提供前端工作台预览。完整的原图精修和大角度场景配准需要同时部署 FastAPI 服务，并将前端构建变量 `VITE_API_BASE` 指向 API 地址。
 
 ## API
 
