@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { chooseSnapCandidate, scoreNaturalCandidate, type NaturalCandidate } from "../natural-features";
 import { matchTemplateNcc } from "../local-correlation";
 import { applyLocalAffine, evaluateRecoveryAnchors, shouldPauseMultiPoint } from "../anchor-propagation";
+import { createMultiPointTracker } from "../multi-tracker";
+import type { PointSeed } from "@subpixel/contracts";
 
 const candidate = (overrides: Partial<NaturalCandidate> = {}): NaturalCandidate => ({
   x: 50, y: 60, cornerStrength: 0.9, textureEntropy: 0.8, descriptorUniqueness: 0.85, boundaryDistance: 0.9, ...overrides
@@ -21,6 +23,15 @@ describe("multi-point primitives", () => {
     expect(validateNaturalMatch({ forwardBackwardError: 1, ncc: 0.8, epipolarError: 1, loweRatio: 0.7 }).accepted).toBe(true);
     expect(validateNaturalMatch({ forwardBackwardError: 1.6, ncc: 0.8, epipolarError: 1, loweRatio: 0.7 }).accepted).toBe(false);
     expect(validateNaturalMatch({ forwardBackwardError: 1, ncc: 0.8, epipolarError: 1, loweRatio: 0.8 }).reason).toContain("Lowe");
+    expect(validateNaturalMatch({ forwardBackwardError: 1, ncc: 0.8 }).accepted).toBe(true);
+  });
+
+  it("does not silently accept a natural observation without identity metrics", () => {
+    const seed: PointSeed = { pointId: "p-001", click: { x: 10, y: 10 }, snapped: { x: 10, y: 10 }, roi: { x: 4, y: 4, width: 13, height: 13 }, groupId: "natural", candidateScore: .9, model: "natural-keypoint" };
+    const tracker = createMultiPointTracker([seed]); tracker.initialize();
+    const result = tracker.process([{ pointId: seed.pointId, predicted: seed.snapped, refined: seed.snapped, confidence: .9, residual: .1 }]);
+    expect(result.tracks[0].pointId).toBe(seed.pointId);
+    expect(result.tracks[0].state).toBe("suspect");
   });
 
   it("propagates points through a local affine fit from reliable anchors", () => {

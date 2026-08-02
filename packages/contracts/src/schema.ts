@@ -235,6 +235,8 @@ export const RiskNoticeSchema = z.object({
     "device.low-battery",
     "device.overheat",
     "recording.unsupported",
+    "video.decode-failed",
+    "image.decode-failed",
     "storage.low",
     "export.failed"
   ]),
@@ -251,6 +253,7 @@ export const RiskNoticeSchema = z.object({
     "select-anchors",
     "pause",
     "resume",
+    "select-file",
     "export-current"
   ]),
   recoverable: z.boolean(),

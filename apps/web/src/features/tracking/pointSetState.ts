@@ -10,7 +10,7 @@ export type PointSetState = {
   cameraSession: CameraSession;
   processingStats: ProcessingStats;
   referenceFrame?: { width: number; height: number; timestampMs: number };
-  recording: { active: boolean; mimeType: string | null; blob: Blob | null };
+  recording: { active: boolean; mimeType: string | null; blob: Blob | null; durationMs: number | null };
 };
 
 export function createPointSetState(seeds: PointSeed[] = []): PointSetState {
@@ -19,7 +19,7 @@ export function createPointSetState(seeds: PointSeed[] = []): PointSetState {
     riskNotices: [],
     cameraSession: { status: "idle", facingMode: "environment", nativeWidth: null, nativeHeight: null, recording: false, error: null },
     processingStats: { processedFrames: 0, droppedFrames: 0, fps: 0, p95LatencyMs: 0, engine: "typescript", nativeWidth: null, nativeHeight: null },
-    recording: { active: false, mimeType: null, blob: null }
+    recording: { active: false, mimeType: null, blob: null, durationMs: null }
   };
 }
 

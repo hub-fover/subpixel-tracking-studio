@@ -11,6 +11,15 @@ function circlePatch(width = 41, height = 41, cx = 20.35, cy = 19.65, radius = 1
   return { width, height, data };
 }
 
+function ringPatch(width = 61, height = 61, cx = 30.35, cy = 29.65) : GrayPatch {
+  const data = new Float32Array(width * height);
+  for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
+    const distance = Math.hypot(x - cx, y - cy);
+    data[y * width + x] = distance >= 15 && distance <= 21 ? 245 : 12;
+  }
+  return { width, height, data };
+}
+
 describe("local refinement", () => {
   it("returns a gated original-coordinate circle center", () => {
     const result = refineLocalPatch(circlePatch(), "circle-center", { x: 100, y: 200, width: 41, height: 41 });
@@ -25,5 +34,15 @@ describe("local refinement", () => {
     const result = refineLocalPatch({ width: 8, height: 8, data: new Float32Array(64) }, "circle-center", { x: 10, y: 20, width: 8, height: 8 });
     expect(result.accepted).toBe(false);
     expect(result.point).toBeNull();
+  });
+
+  it("accepts both edges of a thick circular ring without inflating residual", () => {
+    const result = refineLocalPatch(ringPatch(), "circle-center", { x: 80, y: 120, width: 61, height: 61 });
+    expect(result.accepted).toBe(true);
+    expect(result.point).not.toBeNull();
+    expect(result.residualPx).not.toBeNull();
+    expect(result.residualPx!).toBeLessThanOrEqual(Math.max(.75, .02 * 36));
+    expect(result.point!.x).toBeCloseTo(110.35, 0);
+    expect(result.point!.y).toBeCloseTo(149.65, 0);
   });
 });

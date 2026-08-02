@@ -9,10 +9,19 @@ type WorkerLike = Worker & { onmessage: ((event: MessageEvent<LocalWorkerRespons
 export class LocalWorkerClient {
   private worker?: WorkerLike;
   private sequence = 0;
+  private pending = new Map<number, (response: LocalWorkerResponse) => void>();
 
   constructor() {
     if (typeof Worker === "undefined") return;
-    try { this.worker = new Worker(new URL("../../workers/local-algorithm.worker.ts", import.meta.url), { type: "module" }) as WorkerLike; }
+    try {
+      this.worker = new Worker(new URL("../../workers/local-algorithm.worker.ts", import.meta.url), { type: "module" }) as WorkerLike;
+      this.worker.onmessage = event => {
+        const handler = this.pending.get(event.data.requestId);
+        if (!handler) return;
+        this.pending.delete(event.data.requestId);
+        handler(event.data);
+      };
+    }
     catch { this.worker = undefined; }
   }
 
@@ -21,19 +30,16 @@ export class LocalWorkerClient {
     if (!worker) return Promise.resolve(refineLocalPatch(patch, intent, roi));
     const requestId = ++this.sequence;
     return new Promise(resolve => {
-      const previous = worker.onmessage;
-      worker.onmessage = event => {
-        const response = event.data;
-        if (response.type === "refinement" && response.frame === frame.frame) { worker.onmessage = previous; resolve(response.result); }
-        else if (response.type === "error" && response.frame === frame.frame) { worker.onmessage = previous; resolve({ accepted: false, intent, roi, point: null, confidence: 0, residualPx: null, gates: { worker: false }, reason: response.message, geometry: null }); }
-      };
+      this.pending.set(requestId, response => {
+        if (response.type === "refinement") resolve(response.result);
+        else if (response.type === "error") resolve({ accepted: false, intent, roi, point: null, confidence: 0, residualPx: null, gates: { worker: false }, reason: response.message, geometry: null });
+      });
       const fallbackPatch = { ...patch, data: new Float32Array(patch.data) };
-      const command: LocalWorkerCommand = { type: "refine", frame, patch, roi, intent };
+      const command: LocalWorkerCommand = { type: "refine", requestId, frame, patch, roi, intent };
       try { worker.postMessage(command, [patch.data.buffer]); }
-      catch { worker.onmessage = previous; resolve(refineLocalPatch(fallbackPatch, intent, roi)); }
-      void requestId;
+      catch { this.pending.delete(requestId); resolve(refineLocalPatch(fallbackPatch, intent, roi)); }
     });
   }
 
-  dispose() { this.worker?.terminate(); this.worker = undefined; }
+  dispose() { this.worker?.terminate(); this.worker = undefined; this.pending.clear(); }
 }

@@ -120,7 +120,23 @@ export function registerLocalPatches(reference: GrayPatch, current: GrayPatch, f
   if (cvResult) return cvResult;
   const limit = Math.min(128, Math.floor(Math.min(reference.width, reference.height) / 3));
   let best = { score: -1, count: 0, residual: Infinity, dx: 0, dy: 0 };
-  for (let dy = -limit; dy <= limit; dy += 1) for (let dx = -limit; dx <= limit; dx += 1) {
+  const coarseStep = Math.max(2, Math.floor(limit / 16));
+  const coarseCandidates: typeof best[] = [];
+  for (let dy = -limit; dy <= limit; dy += coarseStep) for (let dx = -limit; dx <= limit; dx += coarseStep) {
+    const result = scoreTranslation(reference, current, dx, dy);
+    const candidate = { ...result, dx, dy };
+    coarseCandidates.push(candidate);
+    if (result.score > best.score) best = candidate;
+  }
+  coarseCandidates.sort((a, b) => b.score - a.score);
+  for (const coarse of coarseCandidates.slice(0, 6)) {
+    for (let dy = Math.max(-limit, coarse.dy - coarseStep); dy <= Math.min(limit, coarse.dy + coarseStep); dy += 1) for (let dx = Math.max(-limit, coarse.dx - coarseStep); dx <= Math.min(limit, coarse.dx + coarseStep); dx += 1) {
+      const result = scoreTranslation(reference, current, dx, dy);
+      if (result.score > best.score) best = { ...result, dx, dy };
+    }
+  }
+  const localLimit = Math.min(16, limit);
+  for (let dy = -localLimit; dy <= localLimit; dy += 1) for (let dx = -localLimit; dx <= localLimit; dx += 1) {
     const result = scoreTranslation(reference, current, dx, dy);
     if (result.score > best.score) best = { ...result, dx, dy };
   }

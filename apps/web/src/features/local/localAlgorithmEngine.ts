@@ -6,9 +6,11 @@ import { refineLocalPatch } from "./localRefinement";
 import { registerLocalPatches } from "./localRegistration";
 
 export type BrowserFrame = LocalFrame & { image: CanvasImageSource };
+export type LocalSearchRegion = { patch: GrayPatch; roi: Roi };
 export type LocalTrackContext = {
   templates: Map<string, GrayPatch>;
   positions: Map<string, { x: number; y: number }>;
+  previousSearches: Map<string, LocalSearchRegion>;
   registration?: FrameRegistration;
   tracker: ReturnType<typeof createMultiPointTracker>;
 };
@@ -46,13 +48,28 @@ export class LocalAlgorithmEngine {
       if (!template) continue;
       const previous = context.positions.get(seed.pointId) ?? seed.snapped;
       const predicted = transformPoint(previous, context.registration?.accepted ? context.registration.transform?.matrix : undefined);
-      const radius = Math.max(10, Math.min(96, Math.max(template.width, template.height) * .5));
+      const registrationError = context.registration?.accepted ? context.registration.medianReprojectionError : 0;
+      const radius = seed.model === "natural-keypoint"
+        ? Math.min(192, Math.max(24, Math.max(template.width, template.height) * 1.5, registrationError * 3 + 24))
+        : Math.max(10, Math.min(96, Math.max(template.width, template.height) * .5));
       const roi = { x: predicted.x - template.width / 2 - radius, y: predicted.y - template.height / 2 - radius, width: template.width + radius * 2, height: template.height + radius * 2 };
       try {
-        const match = matchTemplateNcc(extractNativePatch(frame.image, roi), template);
-        if (match.ncc < .35) continue;
+        const search = extractNativePatch(frame.image, roi);
+        const match = matchTemplateNcc(search, template);
+        if (match.ncc < (seed.model === "natural-keypoint" ? .7 : .35)) continue;
         const refined = { x: roi.x + match.x, y: roi.y + match.y };
-        observations.push({ pointId: seed.pointId, predicted, refined, confidence: Math.max(0, Math.min(1, (match.ncc + 1) / 2)), residual: match.residual, relocationMethod: context.registration?.accepted ? "local-affine" : "local-correlation", metrics: seed.model === "natural-keypoint" ? { forwardBackwardError: 0, ncc: match.ncc, epipolarError: context.registration?.medianReprojectionError ?? 0, loweRatio: Math.max(0, 1 - match.ncc) } : undefined });
+        let forwardBackwardError: number | undefined;
+        if (seed.model === "natural-keypoint") {
+          const candidateRoi = { x: refined.x - template.width / 2, y: refined.y - template.height / 2, width: template.width, height: template.height };
+          const candidatePatch = extractNativePatch(frame.image, candidateRoi);
+          const previousSearch = context.previousSearches.get(seed.pointId);
+          if (previousSearch && candidatePatch.width <= previousSearch.patch.width && candidatePatch.height <= previousSearch.patch.height) {
+            const backward = matchTemplateNcc(previousSearch.patch, candidatePatch);
+            forwardBackwardError = Math.hypot(previousSearch.roi.x + backward.x - previous.x, previousSearch.roi.y + backward.y - previous.y);
+          }
+          context.previousSearches.set(seed.pointId, { patch: search, roi });
+        }
+        observations.push({ pointId: seed.pointId, predicted, refined, confidence: Math.max(0, Math.min(1, (match.ncc + 1) / 2)), residual: match.residual, relocationMethod: context.registration?.accepted ? "local-affine" : "local-correlation", metrics: seed.model === "natural-keypoint" ? { forwardBackwardError: forwardBackwardError ?? Infinity, ncc: match.ncc, epipolarError: context.registration?.accepted ? context.registration.medianReprojectionError : undefined } : undefined });
       } catch { /* The tracker records this point as lost. */ }
     }
     return context.tracker.process(observations, frame.timestampMs, context.registration);

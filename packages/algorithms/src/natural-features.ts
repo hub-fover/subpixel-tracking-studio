@@ -28,13 +28,13 @@ export function chooseSnapCandidate(click: { x: number; y: number }, candidates:
   return { point: { x: best.candidate.x, y: best.candidate.y }, score: best.score, distance: best.distance, snapped: true };
 }
 
-export type NaturalMatchMetrics = { forwardBackwardError: number; ncc: number; epipolarError: number; loweRatio: number };
+export type NaturalMatchMetrics = { forwardBackwardError: number; ncc: number; epipolarError?: number; loweRatio?: number };
 export function validateNaturalMatch(metrics: NaturalMatchMetrics) {
   const checks: [boolean, string][] = [
     [metrics.forwardBackwardError <= 1.5, "forward/backward flow"],
     [metrics.ncc >= 0.7, "NCC"],
-    [metrics.epipolarError <= 2, "epipolar"],
-    [metrics.loweRatio <= 0.75, "Lowe ratio"]
+    [metrics.epipolarError === undefined || metrics.epipolarError <= 2, "epipolar"],
+    [metrics.loweRatio === undefined || metrics.loweRatio <= 0.75, "Lowe ratio"]
   ];
   const failed = checks.find(([accepted]) => !accepted);
   return { accepted: !failed, reason: failed ? `${failed[1]} gate failed` : undefined };

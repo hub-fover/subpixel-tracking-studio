@@ -24,6 +24,58 @@ function edges(patch: GrayPatch): EdgePoint[] {
 
 function globalPoint(roi: Roi, point: Point): Point { return { x: roi.x + point.x, y: roi.y + point.y }; }
 
+function clusteredResidual(values: number[], scale: number) {
+  if (!values.length) return Infinity;
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const single = Math.sqrt(values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length) * scale;
+  const sorted = [...values].sort((a, b) => a - b);
+  let low = sorted[Math.floor(sorted.length * .25)] ?? mean;
+  let high = sorted[Math.floor(sorted.length * .75)] ?? mean;
+  for (let iteration = 0; iteration < 8; iteration += 1) {
+    const lowValues: number[] = []; const highValues: number[] = [];
+    for (const value of values) (Math.abs(value - low) <= Math.abs(value - high) ? lowValues : highValues).push(value);
+    if (!lowValues.length || !highValues.length) break;
+    low = lowValues.reduce((sum, value) => sum + value, 0) / lowValues.length;
+    high = highValues.reduce((sum, value) => sum + value, 0) / highValues.length;
+  }
+  const lowValues = values.filter(value => Math.abs(value - low) <= Math.abs(value - high));
+  const highValues = values.filter(value => Math.abs(value - low) > Math.abs(value - high));
+  const separation = Math.abs(high - low);
+  const balanced = Math.min(lowValues.length, highValues.length) >= values.length * .2;
+  if (!balanced || separation < .03 || separation > .35) return single;
+  const clustered = Math.sqrt(values.reduce((sum, value) => sum + Math.min((value - low) ** 2, (value - high) ** 2), 0) / values.length) * scale;
+  return clustered <= single * .65 ? clustered : single;
+}
+
+function ellipseEdgeResidual(edgePoints: EdgePoint[], center: Point, major: number, minor: number, angleDeg: number) {
+  const angle = angleDeg * Math.PI / 180;
+  const cos = Math.cos(angle); const sin = Math.sin(angle);
+  const a = Math.max(major / 2, 1e-6); const b = Math.max(minor / 2, 1e-6);
+  const normalizedRadii = edgePoints.map(edge => {
+    const dx = edge.x - center.x; const dy = edge.y - center.y;
+    const x = cos * dx + sin * dy; const y = -sin * dx + cos * dy;
+    return Math.sqrt((x / a) ** 2 + (y / b) ** 2);
+  });
+  return clusteredResidual(normalizedRadii, b);
+}
+
+function estimateEllipseFromEdges(edgePoints: EdgePoint[], center: Point) {
+  let xx = 0; let yy = 0; let xy = 0;
+  for (const edge of edgePoints) {
+    const dx = edge.x - center.x; const dy = edge.y - center.y;
+    xx += dx * dx; yy += dy * dy; xy += dx * dy;
+  }
+  xx /= edgePoints.length; yy /= edgePoints.length; xy /= edgePoints.length;
+  const difference = Math.sqrt(Math.max(0, (xx - yy) ** 2 + 4 * xy ** 2));
+  const majorVariance = Math.max(1e-6, (xx + yy + difference) / 2);
+  const minorVariance = Math.max(1e-6, (xx + yy - difference) / 2);
+  return {
+    major: 2 * Math.sqrt(2 * majorVariance),
+    minor: 2 * Math.sqrt(2 * minorVariance),
+    angleDeg: .5 * Math.atan2(2 * xy, xx - yy) * 180 / Math.PI,
+  };
+}
+
 function emptyResult(intent: ExtractionIntent, roi: Roi, reason: string): FeatureRefinement {
   return { accepted: false, intent, roi, point: null, confidence: 0, residualPx: null, gates: { candidate: false }, reason, geometry: null };
 }
@@ -39,11 +91,13 @@ function circleRefinement(patch: GrayPatch, intent: ExtractionIntent, roi: Roi):
       if (!cv.matFromArray) points.data32F.set(values);
       const ellipse = (cv.fitEllipseAMS ?? cv.fitEllipse)!(points);
       const center = { x: Number(ellipse.center.x), y: Number(ellipse.center.y) };
-      const major = Math.max(Number(ellipse.size.width), Number(ellipse.size.height)); const minor = Math.min(Number(ellipse.size.width), Number(ellipse.size.height));
-      const radii = edgePoints.map(edge => Math.hypot(edge.x - center.x, edge.y - center.y)); const radius = radii.reduce((sum, value) => sum + value, 0) / radii.length; const residual = Math.sqrt(radii.reduce((sum, value) => sum + (value - radius) ** 2, 0) / radii.length);
+      const ellipseWidth = Number(ellipse.size.width); const ellipseHeight = Number(ellipse.size.height);
+      const major = Math.max(ellipseWidth, ellipseHeight); const minor = Math.min(ellipseWidth, ellipseHeight);
+      const angle = (Number(ellipse.angle) || 0) + (ellipseWidth < ellipseHeight ? 90 : 0);
+      const residual = ellipseEdgeResidual(edgePoints, center, major, minor, angle);
       const bins = new Set(edgePoints.map(edge => Math.floor(Math.atan2(edge.y - center.y, edge.x - center.x) * 18 / Math.PI + 18) % 36)); const edgeCoverage = bins.size / 36;
       const touchesBoundary = edgePoints.some(edge => edge.x <= 1 || edge.y <= 1 || edge.x >= patch.width - 2 || edge.y >= patch.height - 2); const gates = { edgeCoverage: edgeCoverage >= .6, edgePoints: edgePoints.length >= 32, axisRatio: minor / Math.max(major, 1e-9) >= .15, residual: residual <= Math.max(.75, .02 * minor), roiBoundary: !touchesBoundary };
-      const accepted = Object.values(gates).every(Boolean); const point = globalPoint(roi, center); const geometry: RefinementGeometry = { kind: "ellipse", center: point, majorAxis: major, minorAxis: minor, angleDeg: Number(ellipse.angle) || 0, edgeCoverage, inlierCount: edgePoints.length };
+      const accepted = Object.values(gates).every(Boolean); const point = globalPoint(roi, center); const geometry: RefinementGeometry = { kind: "ellipse", center: point, majorAxis: major, minorAxis: minor, angleDeg: angle, edgeCoverage, inlierCount: edgePoints.length };
       points.delete?.();
       return { accepted, intent, roi, point: accepted ? point : null, confidence: Math.max(0, Math.min(1, edgeCoverage * Math.exp(-residual))), residualPx: residual, gates, reason: accepted ? null : Object.entries(gates).find(([, value]) => !value)?.[0] ?? "refinement.low-confidence", geometry };
     } catch {
@@ -52,17 +106,16 @@ function circleRefinement(patch: GrayPatch, intent: ExtractionIntent, roi: Roi):
   }
   const snapped = snapCooperativeCenter(patch, "circle");
   const center = { x: snapped.x, y: snapped.y };
-  const radii = edgePoints.map(edge => Math.hypot(edge.x - center.x, edge.y - center.y));
-  const radius = radii.reduce((sum, value) => sum + value, 0) / radii.length;
-  const residual = Math.sqrt(radii.reduce((sum, value) => sum + (value - radius) ** 2, 0) / radii.length);
+  const ellipse = estimateEllipseFromEdges(edgePoints, center);
+  const residual = ellipseEdgeResidual(edgePoints, center, ellipse.major, ellipse.minor, ellipse.angleDeg);
   const bins = new Set(edgePoints.map(edge => Math.floor(Math.atan2(edge.y - center.y, edge.x - center.x) * 18 / Math.PI + 18) % 36));
   const edgeCoverage = bins.size / 36;
   const touchesBoundary = edgePoints.some(edge => edge.x <= 1 || edge.y <= 1 || edge.x >= patch.width - 2 || edge.y >= patch.height - 2);
-  const axisRatio = radius > 0 ? 1 : 0;
-  const gates = { edgeCoverage: edgeCoverage >= .6, edgePoints: edgePoints.length >= 32, axisRatio: axisRatio >= .15, residual: residual <= Math.max(.75, .02 * radius * 2), roiBoundary: !touchesBoundary };
+  const axisRatio = ellipse.minor / Math.max(ellipse.major, 1e-9);
+  const gates = { edgeCoverage: edgeCoverage >= .6, edgePoints: edgePoints.length >= 32, axisRatio: axisRatio >= .15, residual: residual <= Math.max(.75, .02 * ellipse.minor), roiBoundary: !touchesBoundary };
   const accepted = Object.values(gates).every(Boolean) && snapped.confidence >= .2;
   const point = globalPoint(roi, center);
-  const geometry: RefinementGeometry = { kind: "ellipse", center: point, majorAxis: radius * 2, minorAxis: radius * 2, angleDeg: 0, edgeCoverage, inlierCount: edgePoints.length };
+  const geometry: RefinementGeometry = { kind: "ellipse", center: point, majorAxis: ellipse.major, minorAxis: ellipse.minor, angleDeg: ellipse.angleDeg, edgeCoverage, inlierCount: edgePoints.length };
   return { accepted, intent, roi, point: accepted ? point : null, confidence: Math.max(0, Math.min(1, edgeCoverage * Math.exp(-residual))), residualPx: residual, gates, reason: accepted ? null : Object.entries(gates).find(([, value]) => !value)?.[0] ?? "refinement.low-confidence", geometry };
 }
 
@@ -92,12 +145,22 @@ function lineRefinement(patch: GrayPatch, intent: ExtractionIntent, roi: Roi, di
 }
 
 function cornerRefinement(patch: GrayPatch, intent: ExtractionIntent, roi: Roi): FeatureRefinement {
-  const candidates: Array<{ x: number; y: number; response: number }> = [];
-  for (let y = 2; y < patch.height - 2; y += 1) for (let x = 2; x < patch.width - 2; x += 1) {
+  const cornerResponse = (x: number, y: number) => {
+    if (x < 1 || y < 1 || x >= patch.width - 1 || y >= patch.height - 1) return -Infinity;
     const gx = patch.data[y * patch.width + x + 1] - patch.data[y * patch.width + x - 1];
     const gy = patch.data[(y + 1) * patch.width + x] - patch.data[(y - 1) * patch.width + x];
-    const response = Math.abs(gx * gy);
-    if (response > 0) candidates.push({ x, y, response });
+    return Math.min(gx * gx, gy * gy);
+  };
+  const candidates: Array<{ x: number; y: number; response: number }> = [];
+  for (let y = 2; y < patch.height - 2; y += 1) for (let x = 2; x < patch.width - 2; x += 1) {
+    const response = cornerResponse(x, y);
+    if (response <= 0) continue;
+    let localMaximum = true;
+    for (let oy = -2; oy <= 2 && localMaximum; oy += 1) for (let ox = -2; ox <= 2; ox += 1) {
+      if (ox === 0 && oy === 0) continue;
+      if (cornerResponse(x + ox, y + oy) > response) localMaximum = false;
+    }
+    if (localMaximum) candidates.push({ x, y, response });
   }
   candidates.sort((a, b) => b.response - a.response);
   const best = candidates[0]; const second = candidates[1];

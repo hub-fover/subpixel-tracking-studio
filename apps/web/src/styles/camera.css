@@ -14,5 +14,7 @@
 @media (max-width: 720px) {
   .source-actions { grid-template-columns: 1fr 1fr 34px; }
   .canvas-toolbar { max-width: calc(100% - 20px); overflow: auto; justify-content: center; }
-  .canvas-toolbar .source-button { white-space: nowrap; }
+  .canvas-toolbar .source-button,
+  .canvas-toolbar .primary-action,
+  .canvas-toolbar .export-control { flex-shrink: 0; white-space: nowrap; }
 }

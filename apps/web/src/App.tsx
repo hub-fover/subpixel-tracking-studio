@@ -2,14 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { createMultiPointTracker, evaluateRecoveryAnchors, type GrayPatch } from "@subpixel/algorithms";
 import type { AnchorCorrespondence, CameraSession, ExtractionIntent, FeatureDraft, FrameRegistration, MultiPointTrack, PointSeed, PointTrack, RecoveryEvent, RiskNotice, Roi, TrackingEvent } from "@subpixel/contracts";
 import { cameraSource, chooseRecordingMimeType, type CameraFacingMode } from "./features/capture/cameraSource";
-import { loadFirstFileFrame } from "./features/capture/fileSource";
+import { loadFirstFileFrame, seekVideoFrame, snapshotVideoFrame, videoFrameTimes, type LoadedFileFrame } from "./features/capture/fileSource";
 import { TrackingWorkbench } from "./features/tracking/TrackingWorkbench";
 import { exportTracking, type ExportFormat } from "./features/report/exportClient";
 import { confirmFeatureDraft, intentToModel, nextPointId } from "./features/roi/pointState";
 import { normalizeNativeRoi, type CanvasMode } from "./features/roi/RoiCanvas";
 import { appendRecoveryEvent, appendRegistration, appendRiskNotice, appendTracks, createPointSetState, flattenTracks, summarizeProcessing, type PointSetState } from "./features/tracking/pointSetState";
 import { extractNativePatch } from "./features/local/frameUtils";
-import { LocalAlgorithmEngine, type BrowserFrame } from "./features/local/localAlgorithmEngine";
+import { LocalAlgorithmEngine, type BrowserFrame, type LocalSearchRegion } from "./features/local/localAlgorithmEngine";
 import { LocalWorkerClient } from "./features/local/localWorkerClient";
 
 const defaultIntent: ExtractionIntent = "circle-center";
@@ -21,6 +21,13 @@ function modelIntent(model: PointSeed["model"]): ExtractionIntent {
   if (model === "blob") return "blob-center";
   if (model === "speckle") return "speckle-center";
   return "natural-keypoint";
+}
+
+export function trackingTemplateRoi(seed: PointSeed, size: { width: number; height: number }) {
+  if (seed.model !== "natural-keypoint") return normalizeNativeRoi(seed.roi, size);
+  let patchSize = Math.max(9, Math.min(31, Math.floor(Math.min(seed.roi.width, seed.roi.height))));
+  if (patchSize % 2 === 0) patchSize -= 1;
+  return normalizeNativeRoi({ x: Math.round(seed.snapped.x - (patchSize - 1) / 2), y: Math.round(seed.snapped.y - (patchSize - 1) / 2), width: patchSize, height: patchSize }, size);
 }
 
 export function App() {
@@ -43,16 +50,23 @@ export function App() {
   const seedsRef = useRef<PointSeed[]>([]);
   const trackerRef = useRef<ReturnType<typeof createMultiPointTracker>>();
   const templatesRef = useRef(new Map<string, GrayPatch>());
+  const previousSearchesRef = useRef(new Map<string, LocalSearchRegion>());
   const positionsRef = useRef(new Map<string, { x: number; y: number }>());
   const frameRef = useRef(0);
   const runningRef = useRef(false);
   const engineRef = useRef(new LocalAlgorithmEngine());
   const localWorkerRef = useRef<LocalWorkerClient>();
   const referenceFrameRef = useRef<BrowserFrame>();
+  const refinementImageRef = useRef<CanvasImageSource>();
+  const refinementImageOwnedRef = useRef(false);
+  const refinementTokenRef = useRef(0);
+  const revisionRef = useRef(0);
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
+  const selectedFilePreviewRef = useRef<LoadedFileFrame>();
   const cameraSourceRef = useRef<Awaited<ReturnType<typeof cameraSource>>>();
   const cameraTokenRef = useRef(0);
   const recorderRef = useRef<MediaRecorder>();
+  const recordingStartedAtRef = useRef(0);
   const recordingChunksRef = useRef<Blob[]>([]);
   const undoTimerRef = useRef<number>();
   const issuedIdsRef = useRef<string[]>([]);
@@ -65,7 +79,7 @@ export function App() {
   useEffect(() => { seedsRef.current = pointState.seeds; }, [pointState.seeds]);
   useEffect(() => { runningRef.current = running; }, [running]);
   useEffect(() => { localWorkerRef.current = new LocalWorkerClient(); return () => localWorkerRef.current?.dispose(); }, []);
-  useEffect(() => () => { cameraTokenRef.current += 1; cameraSourceRef.current?.stop(); recorderRef.current?.stop(); if (undoTimerRef.current) window.clearTimeout(undoTimerRef.current); const previous = displayedImageRef.current; if (previous && "close" in previous) (previous as ImageBitmap).close(); }, []);
+  useEffect(() => () => { cameraTokenRef.current += 1; cameraSourceRef.current?.stop(); selectedFilePreviewRef.current?.release?.(); recorderRef.current?.stop(); releaseRefinementImage(); if (undoTimerRef.current) window.clearTimeout(undoTimerRef.current); const previous = displayedImageRef.current; if (previous && "close" in previous) (previous as ImageBitmap).close(); }, []);
   useEffect(() => { if (image && image !== displayedImageRef.current) { const previous = displayedImageRef.current; displayedImageRef.current = image; const protectedImage = referenceFrameRef.current?.image; if (previous && previous !== protectedImage && "close" in previous) (previous as ImageBitmap).close(); } }, [image]);
   useEffect(() => {
     const onOrientationChange = () => addRisk({ code: "camera.orientation-changed", severity: "warning", frame: frameRef.current, message: "屏幕方向发生变化，已保持原生坐标；请确认 ROI 仍覆盖目标", action: "reselect-roi", recoverable: true });
@@ -82,15 +96,40 @@ export function App() {
     else if (!status.capabilities.registration || !status.capabilities.descriptors) addRisk({ code: "opencv.feature-unavailable", severity: "warning", frame: frameRef.current, message: "当前 OpenCV.js 构建缺少 SIFT/ORB 或单应配准能力", action: "continue-local", recoverable: true });
   };
 
+  const releaseRefinementImage = () => {
+    const source = refinementImageRef.current;
+    if (source && refinementImageOwnedRef.current && "close" in source) (source as ImageBitmap).close();
+    refinementImageRef.current = undefined;
+    refinementImageOwnedRef.current = false;
+  };
+
+  const nextRevision = () => {
+    revisionRef.current += 1;
+    return revisionRef.current;
+  };
+
+  const snapshotRefinementImage = async (source: CanvasImageSource) => {
+    if (typeof createImageBitmap !== "function") return { image: source, owned: false };
+    try {
+      return { image: await createImageBitmap(source as ImageBitmapSource), owned: true };
+    } catch {
+      return { image: source, owned: false };
+    }
+  };
+
   useEffect(() => {
-    if (!draft || !image || !sourceSize) return;
+    // Keep refinement on one native frame. Live camera frames would cancel the debounce.
+    const refinementImage = refinementImageRef.current;
+    if (!draft || !refinementImage || !sourceSize) return;
     const revision = draft.revision;
     const timer = window.setTimeout(() => {
-      const frame: BrowserFrame = { frame: frameRef.current, timestampMs: performance.now(), width: sourceSize.width, height: sourceSize.height, source: cameraActive ? "camera" : "image", image };
+      const frame: BrowserFrame = { frame: frameRef.current, timestampMs: performance.now(), width: sourceSize.width, height: sourceSize.height, source: cameraActive ? "camera" : "image", image: refinementImage };
       void (async () => {
         try {
           const patch = extractNativePatch(frame.image, draft.roi);
-          const result = await (localWorkerRef.current?.refine(frame, patch, draft.roi, draft.intent) ?? Promise.resolve(engineRef.current.refine(frame, draft.roi, draft.intent)));
+          const result = engineRef.current.engineStatus.opencv === "ready"
+            ? engineRef.current.refine(frame, draft.roi, draft.intent)
+            : await (localWorkerRef.current?.refine(frame, patch, draft.roi, draft.intent) ?? Promise.resolve(engineRef.current.refine(frame, draft.roi, draft.intent)));
           setDraft(current => current && current.revision === revision ? { ...current, status: result.accepted ? "ready" : "invalid", refinement: result } : current);
           if (!result.accepted) addRisk({ code: result.reason === "refinement.invalid-roi" ? "refinement.invalid-roi" : "refinement.gate-failed", severity: "warning", frame: frame.frame, message: result.reason ?? "ROI refinement rejected", action: "reselect-roi", recoverable: true });
         } catch (error) {
@@ -100,14 +139,14 @@ export function App() {
       })();
     }, 150);
     return () => window.clearTimeout(timer);
-  }, [cameraActive, draft?.id, draft?.revision, draft?.roi.x, draft?.roi.y, draft?.roi.width, draft?.roi.height, image, sourceSize]);
+  }, [cameraActive, draft?.id, draft?.revision, draft?.roi.x, draft?.roi.y, draft?.roi.width, draft?.roi.height, sourceSize?.width, sourceSize?.height]);
 
   const processFrame = (frame: BrowserFrame, registration?: FrameRegistration) => {
     const startedAt = performance.now();
     frameRef.current = frame.frame;
     const tracker = trackerRef.current;
     if (!tracker) return;
-    const result = engineRef.current.track(frame, seedsRef.current, { templates: templatesRef.current, positions: positionsRef.current, registration, tracker });
+    const result = engineRef.current.track(frame, seedsRef.current, { templates: templatesRef.current, positions: positionsRef.current, previousSearches: previousSearchesRef.current, registration, tracker });
     result.tracks.filter(track => track.state === "lost" || track.state === "suspect").forEach(track => addRisk({ code: "tracking.identity-gate-failed", severity: track.state === "lost" ? "error" : "warning", frame: frame.frame, pointId: track.pointId, message: `${track.pointId} identity gate failed`, action: "select-anchors", recoverable: true }));
     result.tracks.filter(track => track.state === "valid").forEach(track => positionsRef.current.set(track.pointId, track.refined));
     setPointState(state => registration ? appendRegistration(appendTracks(state, result.tracks), registration) : appendTracks(state, result.tracks));
@@ -118,28 +157,55 @@ export function App() {
     const processingStats = summarizeProcessing({ processedFrames: processedFrameCountRef.current, droppedFrames: droppedFrameCountRef.current, latencies: latencyRef.current, nativeWidth: frame.width, nativeHeight: frame.height, engine: engineRef.current.engineStatus.opencv === "ready" ? "opencv-js" : "typescript" });
     setPointState(state => ({ ...state, processingStats }));
     if (processingStats.p95LatencyMs > 1000 / 15) addRisk({ code: "tracking.frame-budget", severity: "warning", frame: frame.frame, message: `处理 P95 ${processingStats.p95LatencyMs.toFixed(1)} ms，已跳帧保持原始分辨率`, action: "pause", recoverable: true });
-    if (result.paused) { runningRef.current = false; setRunning(false); setMode("recover"); setRecoveryPaused(true); addRisk({ code: "tracking.lost", severity: "error", frame: frame.frame, message: `Lost ratio ${(result.lostRatio * 100).toFixed(0)}%; tracking paused`, action: "select-anchors", recoverable: true }); addEvent({ id: `lost-${frame.frame}`, frame: frame.frame, kind: "lost", message: "Tracking paused; select recovery anchors", recoverable: true }); }
+    if (result.paused) { const pauseMessage = registration?.accepted === false ? `场景配准失败：${registration.reason ?? "质量门控未通过"}` : `失锁比例 ${(result.lostRatio * 100).toFixed(0)}%，跟踪已暂停`; runningRef.current = false; setRunning(false); setMode("recover"); setRecoveryPaused(true); addRisk({ code: "tracking.lost", severity: "error", frame: frame.frame, message: pauseMessage, action: "select-anchors", recoverable: true }); addEvent({ id: `lost-${frame.frame}`, frame: frame.frame, kind: "lost", message: `${pauseMessage}；请选择恢复锚点`, recoverable: true }); }
   };
 
   const initializeTrackingFor = (baseImage: CanvasImageSource, size: { width: number; height: number }, source: BrowserFrame["source"]) => {
     if (!seedsRef.current.length) return false;
     trackerRef.current = createMultiPointTracker(seedsRef.current); trackerRef.current.initialize();
-    templatesRef.current = new Map(seedsRef.current.map(seed => [seed.pointId, extractNativePatch(baseImage, seed.roi)]));
+    templatesRef.current = new Map(seedsRef.current.map(seed => [seed.pointId, extractNativePatch(baseImage, trackingTemplateRoi(seed, size))]));
+    previousSearchesRef.current = new Map(seedsRef.current.map(seed => {
+      const template = templatesRef.current.get(seed.pointId)!;
+      const radius = seed.model === "natural-keypoint" ? Math.min(192, Math.max(24, Math.max(template.width, template.height) * 1.5)) : Math.max(10, Math.min(96, Math.max(template.width, template.height) * .5));
+      const searchRoi = normalizeNativeRoi({ x: seed.snapped.x - template.width / 2 - radius, y: seed.snapped.y - template.height / 2 - radius, width: template.width + radius * 2, height: template.height + radius * 2 }, size);
+      return [seed.pointId, { patch: extractNativePatch(baseImage, searchRoi), roi: searchRoi }];
+    }));
     positionsRef.current = new Map(seedsRef.current.map(seed => [seed.pointId, seed.snapped]));
     referenceFrameRef.current = { frame: 0, timestampMs: 0, width: size.width, height: size.height, source, image: baseImage };
     frameRef.current = 0; runningRef.current = true; setLegacyTracks([]); setPointState(state => ({ ...state, tracksByPoint: new Map(), registrations: [] })); setMode("track"); setRunning(true); return true;
   };
 
-  const initializeTracking = () => image && sourceSize ? initializeTrackingFor(image, sourceSize, cameraActive ? "camera" : "image") : false;
+  const initializeTracking = () => image && sourceSize ? initializeTrackingFor(image, sourceSize, cameraActive ? "camera" : files[0]?.type.startsWith("video/") ? "video" : "image") : false;
 
   const processFiles = async (selected: File[]) => {
-    for (let index = 0; index < selected.length; index += 1) {
-      const loaded = await loadFirstFileFrame(selected[index]);
-      const frame: BrowserFrame = { frame: index, timestampMs: loaded.timestampMs, width: loaded.width, height: loaded.height, source: selected[index].type.startsWith("video/") ? "video" : "image", image: loaded.image };
-      setImage(loaded.image); setSourceSize({ width: loaded.width, height: loaded.height });
-      const registration = index > 0 && referenceFrameRef.current && (index === 1 || index % 5 === 0) ? engineRef.current.register(referenceFrameRef.current, frame, index) : undefined;
-      processFrame(frame, registration);
-      if (registration && !registration.accepted) addRisk({ code: "registration.rejected", severity: "warning", frame: index, message: registration.reason ?? "Scene registration rejected", action: "select-anchors", recoverable: true });
+    let frameNumber = 0;
+    for (let fileIndex = 0; fileIndex < selected.length && runningRef.current; fileIndex += 1) {
+      const isPreview = fileIndex === 0 && Boolean(selectedFilePreviewRef.current);
+      const loaded = isPreview ? selectedFilePreviewRef.current! : await loadFirstFileFrame(selected[fileIndex]);
+      if (loaded.video) {
+        let latestPreview: CanvasImageSource = loaded.image;
+        for (const timeSeconds of videoFrameTimes(loaded.durationMs ? loaded.durationMs / 1000 : loaded.video.duration, 15)) {
+          if (!runningRef.current) break;
+          const currentImage = timeSeconds === 0 ? loaded.image : (await seekVideoFrame(loaded.video, timeSeconds), await snapshotVideoFrame(loaded.video));
+          if (latestPreview !== loaded.image && latestPreview !== currentImage && "close" in latestPreview) (latestPreview as ImageBitmap).close();
+          latestPreview = currentImage;
+          const frame: BrowserFrame = { frame: frameNumber, timestampMs: timeSeconds * 1000, width: loaded.width, height: loaded.height, source: "video", image: currentImage };
+          const registration = frameNumber > 0 && frameNumber % 5 === 0 && referenceFrameRef.current ? engineRef.current.register(referenceFrameRef.current, frame, frameNumber) : undefined;
+          processFrame(frame, registration);
+          if (registration && !registration.accepted) addRisk({ code: "registration.rejected", severity: "warning", frame: frameNumber, message: registration.reason ?? "场景配准被拒绝", action: "select-anchors", recoverable: true });
+          frameNumber += 1;
+          if (trackerRef.current?.paused) break;
+        }
+        setImage(latestPreview); setSourceSize({ width: loaded.width, height: loaded.height });
+      } else {
+        const frame: BrowserFrame = { frame: frameNumber, timestampMs: loaded.timestampMs, width: loaded.width, height: loaded.height, source: "image", image: loaded.image };
+        setImage(loaded.image); setSourceSize({ width: loaded.width, height: loaded.height });
+        const registration = frameNumber > 0 && (frameNumber === 1 || frameNumber % 5 === 0) && referenceFrameRef.current ? engineRef.current.register(referenceFrameRef.current, frame, frameNumber) : undefined;
+        processFrame(frame, registration);
+        if (registration && !registration.accepted) addRisk({ code: "registration.rejected", severity: "warning", frame: frameNumber, message: registration.reason ?? "场景配准被拒绝", action: "select-anchors", recoverable: true });
+        frameNumber += 1;
+      }
+      if (!isPreview) loaded.release?.();
       if (trackerRef.current?.paused) break;
     }
     runningRef.current = false; setRunning(false);
@@ -147,15 +213,21 @@ export function App() {
 
   const selectFiles = async (selected: File[]) => {
     if (!selected.length) return;
-    cameraSourceRef.current?.stop(); setCameraActive(false); setRunning(false); setFiles(selected); setPointState(createPointSetState()); setDraft(undefined); setLegacyTracks([]); issuedIdsRef.current = [];
-    const first = await loadFirstFileFrame(selected[0]); setImage(first.image); setReferenceImage(first.image); setSourceSize({ width: first.width, height: first.height }); setMode("annotate");
-    void engineRef.current.load().then(reportEngineStatus);
+    cameraSourceRef.current?.stop(); selectedFilePreviewRef.current?.release?.(); selectedFilePreviewRef.current = undefined; referenceFrameRef.current = undefined; trackerRef.current = undefined; templatesRef.current.clear(); previousSearchesRef.current.clear(); positionsRef.current.clear(); setCameraActive(false); setRunning(false); setFiles(selected); setPointState(createPointSetState()); releaseRefinementImage(); refinementTokenRef.current += 1; setDraft(undefined); setLegacyTracks([]); issuedIdsRef.current = [];
+    try {
+      const first = await loadFirstFileFrame(selected[0]); selectedFilePreviewRef.current = first; refinementImageRef.current = first.image; setImage(first.image); setReferenceImage(first.image); setSourceSize({ width: first.width, height: first.height }); setMode("annotate");
+      void engineRef.current.load().then(reportEngineStatus);
+    } catch (error) {
+      setFiles([]); setImage(undefined); setReferenceImage(undefined); setSourceSize(undefined);
+      addRisk({ code: selected[0].type.startsWith("video/") ? "video.decode-failed" : "image.decode-failed", severity: "error", frame: 0, message: error instanceof Error ? error.message : "文件解码失败", action: "select-file", recoverable: true });
+    }
   };
 
   const openCamera = async (requestedFacingMode: CameraFacingMode = facingMode) => {
     const video = cameraVideoRef.current;
     if (!video) return;
     if (cameraSourceRef.current) { cameraTokenRef.current += 1; cameraSourceRef.current.stop(); cameraSourceRef.current = undefined; setCameraActive(false); setPointState(state => ({ ...state, cameraSession: { ...state.cameraSession, status: "stopped", recording: false } })); return; }
+    referenceFrameRef.current = undefined; trackerRef.current = undefined; templatesRef.current.clear(); previousSearchesRef.current.clear(); positionsRef.current.clear(); releaseRefinementImage(); refinementTokenRef.current += 1; setDraft(undefined); setReferenceImage(undefined); setLegacyTracks([]); issuedIdsRef.current = []; setPointState(createPointSetState());
     setPointState(state => ({ ...state, cameraSession: { ...state.cameraSession, status: "requesting", facingMode: requestedFacingMode, error: null } }));
     void engineRef.current.load().then(reportEngineStatus);
     try {
@@ -166,7 +238,7 @@ export function App() {
           if (token !== cameraTokenRef.current) break;
           const frame: BrowserFrame = { frame: frameRef.current + 1, timestampMs: captured.timestampMs, width: captured.width, height: captured.height, source: "camera", image: captured.image };
           setImage(captured.image); setSourceSize({ width: captured.width, height: captured.height });
-          if (!referenceFrameRef.current) { referenceFrameRef.current = frame; setReferenceImage(captured.image); }
+          if (!referenceFrameRef.current) { referenceFrameRef.current = frame; refinementImageRef.current = captured.image; setReferenceImage(captured.image); }
           if (runningRef.current && trackerRef.current) {
             if (captured.timestampMs - lastProcessedAtRef.current < 1000 / 15) { droppedFrameCountRef.current += 1; continue; }
             lastProcessedAtRef.current = captured.timestampMs;
@@ -192,42 +264,70 @@ export function App() {
     if (recorderRef.current) { recorderRef.current.stop(); return; }
     const mimeType = chooseRecordingMimeType();
     if (!mimeType) { addRisk({ code: "recording.unsupported", severity: "warning", frame: frameRef.current, message: "No supported recording format", action: "continue-local", recoverable: true }); return; }
-    const recorder = new MediaRecorder(stream, { mimeType }); recordingChunksRef.current = [];
+    let recorder: MediaRecorder;
+    try { recorder = new MediaRecorder(stream, { mimeType }); }
+    catch (error) { addRisk({ code: "recording.unsupported", severity: "error", frame: frameRef.current, message: error instanceof Error ? error.message : "无法创建录像编码器", action: "continue-local", recoverable: true }); return; }
+    recordingChunksRef.current = [];
     recorder.ondataavailable = event => { if (event.data.size) recordingChunksRef.current.push(event.data); };
-    recorder.onstop = () => { const blob = new Blob(recordingChunksRef.current, { type: mimeType }); recorderRef.current = undefined; setRecordingActive(false); setPointState(state => ({ ...state, recording: { active: false, mimeType, blob }, cameraSession: { ...state.cameraSession, recording: false } })); };
-    recorder.start(500); recorderRef.current = recorder; setRecordingActive(true); setPointState(state => ({ ...state, recording: { active: true, mimeType, blob: null }, cameraSession: { ...state.cameraSession, recording: true } }));
+    recorder.onerror = () => addRisk({ code: "recording.unsupported", severity: "error", frame: frameRef.current, message: "录像编码器发生错误", action: "retry", recoverable: true });
+    recorder.onstop = () => { const blob = new Blob(recordingChunksRef.current, { type: mimeType }); const durationMs = Math.max(0, performance.now() - recordingStartedAtRef.current); recorderRef.current = undefined; setRecordingActive(false); setPointState(state => ({ ...state, recording: { active: false, mimeType, blob, durationMs }, cameraSession: { ...state.cameraSession, recording: false } })); };
+    recordingStartedAtRef.current = performance.now(); recorder.start(500); recorderRef.current = recorder; setRecordingActive(true); setPointState(state => ({ ...state, recording: { active: true, mimeType, blob: null, durationMs: null }, cameraSession: { ...state.cameraSession, recording: true } }));
   };
 
   const refineRecording = async () => {
     const blob = pointState.recording.blob;
     if (!blob || !seedsRef.current.length) return;
-    const video = document.createElement("video"); video.muted = true; video.playsInline = true; video.src = URL.createObjectURL(blob);
+    const video = document.createElement("video"); const objectUrl = URL.createObjectURL(blob); video.muted = true; video.playsInline = true; video.preload = "auto"; video.src = objectUrl;
     try {
-      await new Promise<void>((resolve, reject) => { video.onloadedmetadata = () => resolve(); video.onerror = () => reject(new Error("录制文件无法解码")); });
+      await new Promise<void>((resolve, reject) => { video.onloadeddata = () => resolve(); video.onerror = () => reject(new Error("录制文件无法解码")); });
       const size = { width: video.videoWidth, height: video.videoHeight }; if (!size.width || !size.height) throw new Error("录制文件缺少原生尺寸");
-      await new Promise<void>((resolve, reject) => { video.onseeked = () => resolve(); video.onerror = () => reject(new Error("无法定位录制帧")); video.currentTime = 0; });
-      const firstImage = typeof createImageBitmap === "function" ? await createImageBitmap(video) : video;
-      setImage(video); setSourceSize(size); setReferenceImage(firstImage); initializeTrackingFor(firstImage, size, "video");
-      for (let index = 1, timestamp = 1 / 15; timestamp < video.duration && runningRef.current; index += 1, timestamp += 1 / 15) {
-        await new Promise<void>((resolve, reject) => { video.onseeked = () => resolve(); video.onerror = () => reject(new Error("无法定位录制帧")); video.currentTime = timestamp; });
-        const currentImage = typeof createImageBitmap === "function" ? await createImageBitmap(video) : video;
+      video.pause(); await seekVideoFrame(video, 0);
+      const firstImage = await snapshotVideoFrame(video); let latestPreview = firstImage;
+      setImage(firstImage); setSourceSize(size); setReferenceImage(firstImage); initializeTrackingFor(firstImage, size, "video");
+      const frameTimes = videoFrameTimes(Number.isFinite(video.duration) ? video.duration : (pointState.recording.durationMs ?? 0) / 1000, 15);
+      for (let index = 1; index < frameTimes.length && runningRef.current; index += 1) {
+        const timestamp = frameTimes[index]; await seekVideoFrame(video, timestamp);
+        const currentImage = await snapshotVideoFrame(video);
+        if (latestPreview !== firstImage && latestPreview !== currentImage && "close" in latestPreview) (latestPreview as ImageBitmap).close();
+        latestPreview = currentImage;
         const frame: BrowserFrame = { frame: index, timestampMs: timestamp * 1000, width: size.width, height: size.height, source: "video", image: currentImage };
         const registration = index % 5 === 0 && referenceFrameRef.current ? engineRef.current.register(referenceFrameRef.current, frame, index) : undefined;
         processFrame(frame, registration);
         if (registration && !registration.accepted) addRisk({ code: "registration.rejected", severity: "warning", frame: index, message: registration.reason ?? "Scene registration rejected", action: "select-anchors", recoverable: true });
-        if (currentImage !== video && "close" in currentImage) (currentImage as ImageBitmap).close();
         if (trackerRef.current?.paused) break;
       }
-    } catch (error) { addRisk({ code: "export.failed", severity: "error", frame: frameRef.current, message: error instanceof Error ? error.message : "录制精算失败", action: "retry", recoverable: true }); }
-    finally { URL.revokeObjectURL(video.src); setRunning(false); }
+      setImage(latestPreview); setSourceSize(size);
+    } catch (error) { addRisk({ code: "video.decode-failed", severity: "error", frame: frameRef.current, message: error instanceof Error ? error.message : "录制精算失败", action: "retry", recoverable: true }); }
+    finally { video.removeAttribute("src"); video.load(); URL.revokeObjectURL(objectUrl); runningRef.current = false; setRunning(false); }
   };
 
-  const onSelectionChange = (value: Roi) => { if (!image || !sourceSize) return; const roi = normalizeNativeRoi(value, sourceSize); setDraft(current => current ? { ...current, roi, revision: Date.now(), status: "refining", refinement: null } : { id: `draft-${Date.now()}`, status: "refining", intent, roi, revision: Date.now(), refinement: null }); };
-  const confirmDraft = () => { if (!draft) return; const seed = confirmFeatureDraft(draft, nextPointId(issuedIdsRef.current)); if (!seed) return; issuedIdsRef.current = [...issuedIdsRef.current, seed.pointId]; setPointState(state => ({ ...state, seeds: [...state.seeds, seed], activePointIds: [...state.activePointIds, seed.pointId] })); setDraft(undefined); setMode("annotate"); addEvent({ id: `initialized-${seed.pointId}`, frame: 0, kind: "initialized", message: `${seed.pointId} confirmed`, recoverable: false }); };
-  const deleteDraft = () => setDraft(undefined);
+  const beginFeatureDraft = (value: Roi, draftIntent: ExtractionIntent) => {
+    if (!image || !sourceSize) return;
+    const roi = normalizeNativeRoi(value, sourceSize);
+    if (draft) {
+      setDraft(current => current ? { ...current, roi, revision: nextRevision(), status: "refining", refinement: null } : current);
+      return;
+    }
+    const id = `draft-${Date.now()}`;
+    const token = ++refinementTokenRef.current;
+    setDraft({ id, status: "selecting", intent: draftIntent, roi, revision: nextRevision(), refinement: null });
+    void snapshotRefinementImage(image).then(snapshot => {
+      if (token !== refinementTokenRef.current) {
+        if (snapshot.owned && "close" in snapshot.image) (snapshot.image as ImageBitmap).close();
+        return;
+      }
+      releaseRefinementImage();
+      refinementImageRef.current = snapshot.image;
+      refinementImageOwnedRef.current = snapshot.owned;
+      setDraft(current => current?.id === id ? { ...current, status: "refining", revision: nextRevision() } : current);
+    });
+  };
+  const onSelectionChange = (value: Roi) => beginFeatureDraft(value, intent);
+  const confirmDraft = () => { if (!draft) return; const seed = confirmFeatureDraft(draft, nextPointId(issuedIdsRef.current)); if (!seed) return; issuedIdsRef.current = [...issuedIdsRef.current, seed.pointId]; setPointState(state => ({ ...state, seeds: [...state.seeds, seed], activePointIds: [...state.activePointIds, seed.pointId] })); refinementTokenRef.current += 1; releaseRefinementImage(); setDraft(undefined); setMode("annotate"); addEvent({ id: `initialized-${seed.pointId}`, frame: 0, kind: "initialized", message: `${seed.pointId} confirmed`, recoverable: false }); };
+  const deleteDraft = () => { refinementTokenRef.current += 1; releaseRefinementImage(); setDraft(undefined); };
   const deleteSeed = (pointId: string) => setPointState(state => { const found = state.seeds.find(seed => seed.pointId === pointId); if (found) { setDeletedSeed(found); if (undoTimerRef.current) window.clearTimeout(undoTimerRef.current); undoTimerRef.current = window.setTimeout(() => setDeletedSeed(undefined), 5000); } const tracksByPoint = new Map(state.tracksByPoint); tracksByPoint.delete(pointId); return { ...state, seeds: state.seeds.filter(seed => seed.pointId !== pointId), tracksByPoint, activePointIds: state.activePointIds.filter(id => id !== pointId) }; });
   const undoDelete = () => { if (!deletedSeed) return; setPointState(state => ({ ...state, seeds: [...state.seeds, deletedSeed].sort((a, b) => a.pointId.localeCompare(b.pointId)), activePointIds: [...state.activePointIds, deletedSeed.pointId].sort() })); setDeletedSeed(undefined); };
-  const reinitialize = (pointId: string) => { const seed = pointState.seeds.find(item => item.pointId === pointId); if (!seed) return; deleteSeed(pointId); const nextIntent = modelIntent(seed.model); setIntent(nextIntent); setDraft({ id: `draft-${Date.now()}`, status: "refining", intent: nextIntent, roi: seed.roi, revision: Date.now(), refinement: null }); };
+  const reinitialize = (pointId: string) => { const seed = pointState.seeds.find(item => item.pointId === pointId); if (!seed) return; deleteSeed(pointId); const nextIntent = modelIntent(seed.model); setIntent(nextIntent); beginFeatureDraft(seed.roi, nextIntent); };
   const toggleTracking = async () => { if (running) { runningRef.current = false; setRunning(false); return; } await engineRef.current.load(); if (!initializeTracking()) return; if (!cameraActive) await processFiles(files); };
   const applyRecovery = (correspondences: AnchorCorrespondence[]) => { if (!trackerRef.current || correspondences.length < 4 || !sourceSize) return; const anchors = correspondences.map(anchor => ({ reference: anchor.reference, current: anchor.current, reliable: anchor.confidence >= .5 })); const quality = evaluateRecoveryAnchors(anchors, sourceSize); if (!quality.accepted) { addRisk({ code: "tracking.lost", severity: "error", frame: frameRef.current, message: quality.reason ?? "Recovery anchors rejected", action: "select-anchors", recoverable: true }); return; } trackerRef.current.applyAnchors(anchors); const event: RecoveryEvent = { id: `recovery-applied-${Date.now()}`, frame: frameRef.current, kind: "applied", anchorCount: anchors.length, coverage: quality.coverage, inlierRatio: 1, predictedMedianError: quality.predictedMedianError ?? 0, reversible: true, message: "recovery applied" }; setPointState(state => appendRecoveryEvent(state, event)); setRecoveryPaused(false); runningRef.current = true; setRunning(true); setMode("track"); };
   const rollbackRecovery = () => { setPointState(state => appendRecoveryEvent(state, { id: `recovery-rollback-${Date.now()}`, frame: frameRef.current, kind: "rolled-back", anchorCount: 0, coverage: 0, inlierRatio: 0, predictedMedianError: 0, reversible: false, message: "recovery rolled back" })); setRecoveryPaused(false); runningRef.current = true; setRunning(true); setMode("track"); };

@@ -38,12 +38,12 @@ export function createMultiPointTracker(seeds: PointSeed[], options: { pauseLost
       let state: MultiPointTrack["state"] = "lost";
       if (observation) {
         const metrics = observation.metrics;
-        const naturalGate = seed.model !== "natural-keypoint" || !metrics || validateNaturalMatch({
+        const naturalGate = seed.model !== "natural-keypoint" || Boolean(metrics && validateNaturalMatch({
           forwardBackwardError: metrics.forwardBackwardError ?? Infinity,
           ncc: metrics.ncc ?? -1,
-          epipolarError: metrics.epipolarError ?? Infinity,
-          loweRatio: metrics.loweRatio ?? Infinity
-        }).accepted;
+          epipolarError: metrics.epipolarError,
+          loweRatio: metrics.loweRatio
+        }).accepted);
         state = naturalGate && observation.confidence >= 0.35 ? "valid" : "suspect";
       }
       if (state === "valid") previous.set(seed.pointId, refined);
