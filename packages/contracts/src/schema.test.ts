@@ -207,6 +207,11 @@ describe("report contracts", () => {
       includedAssets: ["raw-data", "charts"], keyFrameCount: 12,
       imageQuality: "full", language: "zh-CN"
     })).toMatchObject({ keyFrameCount: 12 });
+    expect(ReportOptionsSchema.parse({}).language).toBe("zh-CN");
+    expect(ReportMetadataSchema.parse({
+      reportNumber: "R-2026-002", reportId: "report-2", projectName: "", testId: "", operator: "",
+      notes: "", sourceFile: "image.png", generatedAt: "2026-08-02T08:00:00.000Z", buildCommit: "dev"
+    })).toMatchObject({ projectName: "", testId: "", operator: "" });
     expect(QualityThresholdsSchema.safeParse({
       passValidRatio: .8, reviewValidRatio: .95,
       passConfidenceP50: .8, reviewConfidenceP50: .55,

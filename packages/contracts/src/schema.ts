@@ -284,9 +284,9 @@ export const ProcessingStatsSchema = z.object({
 export const ReportMetadataSchema = z.object({
   reportNumber: z.string().min(1),
   reportId: z.string().min(1),
-  projectName: z.string().min(1),
-  testId: z.string().min(1),
-  operator: z.string().min(1),
+  projectName: z.string().default(""),
+  testId: z.string().default(""),
+  operator: z.string().default(""),
   notes: z.string().default(""),
   sourceFile: z.string().min(1),
   generatedAt: z.string().datetime({ offset: true }),
@@ -311,7 +311,7 @@ export const ReportOptionsSchema = z.object({
   includedAssets: z.array(z.string().min(1)).default([]),
   keyFrameCount: z.number().int().min(0).max(20).default(20),
   imageQuality: z.enum(["full", "lightweight"]).default("full"),
-  language: z.string().min(1).default("en")
+  language: z.string().min(1).default("zh-CN")
 });
 
 const ReportAssetSchema = z.object({
