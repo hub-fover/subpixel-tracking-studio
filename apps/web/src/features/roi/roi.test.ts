@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampRoi, computeFitScale, fitImageSize, normalizeNativeRoi, roiFromDrag } from "./RoiCanvas";
+import { clampRoi, clampViewZoom, computeFitScale, fitImageSize, normalizeNativeRoi, roiFromDrag } from "./RoiCanvas";
 import { confirmFeatureDraft, intentToModel, nextPointId } from "./pointState";
 
 describe("ROI", () => { it("clamps to image bounds", () => { expect(clampRoi({ x: -5, y: 90, width: 30, height: 30 }, { width: 100, height: 100 })).toEqual({ x: 0, y: 90, width: 30, height: 10 }); }); });
@@ -12,6 +12,12 @@ it("keeps the original pixel buffer at native resolution", () => {
 it("fits a native image into the viewport without changing algorithm pixels", () => {
   expect(computeFitScale(400, 300, 1600, 1200)).toBeCloseTo(0.2267, 3);
   expect(computeFitScale(2400, 1800, 1600, 1200)).toBe(1);
+});
+
+it("allows inspection zoom well beyond eight times without unbounded transforms", () => {
+  expect(clampViewZoom(16)).toBe(16);
+  expect(clampViewZoom(256)).toBe(128);
+  expect(clampViewZoom(.1)).toBe(.25);
 });
 
 it("creates and clamps an ROI when dragging in either direction", () => {
