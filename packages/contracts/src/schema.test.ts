@@ -13,6 +13,11 @@ import {
   RiskNoticeSchema,
   CameraSessionSchema,
   ProcessingStatsSchema,
+  QualityThresholdsSchema,
+  ReportManifestSchema,
+  ReportMetadataSchema,
+  ReportModelSchema,
+  ReportOptionsSchema,
   TrackingJobSchema
 } from "./schema";
 
@@ -168,5 +173,100 @@ describe("tracking contracts", () => {
     expect(FrameRegistrationSchema.parse({ frame: 2, method: "sift-ransac", inlierCount: 120, matchCount: 180, inlierRatio: 2 / 3, medianReprojectionError: 1.2 }).frame).toBe(2);
     expect(AnchorCorrespondenceSchema.parse({ pointId: "p-01", reference: { x: 10, y: 20 }, current: { x: 12, y: 23 }, confidence: 0.9 }).pointId).toBe("p-01");
     expect(RecoveryEventSchema.parse({ id: "recovery-1", frame: 20, kind: "applied", anchorCount: 6, coverage: 0.4, inlierRatio: 0.8, predictedMedianError: 2.1, reversible: true }).kind).toBe("applied");
+  });
+});
+
+describe("report contracts", () => {
+  it("accepts bundle exports and preserves optional Lowe ratio measurements", () => {
+    const job = MultiPointJobSchema.parse({
+      id: "multi-report",
+      mode: "local",
+      source: { kind: "video", name: "test.mp4" },
+      frameRange: { start: 0, end: 1, sampleRate: 1 },
+      seeds: [],
+      exports: ["bundle"]
+    });
+    const track = MultiPointTrackSchema.parse({
+      pointId: "p-01", frame: 0, timestampMs: 0,
+      predicted: { x: 10, y: 20 }, refined: { x: 10.1, y: 20.1 },
+      model: "natural-keypoint", confidence: .9, residual: .2,
+      loweRatio: .72, state: "valid"
+    });
+
+    expect(job.exports).toEqual(["bundle"]);
+    expect(track.loweRatio).toBe(.72);
+  });
+
+  it("validates report metadata, options, and ordered quality thresholds", () => {
+    expect(ReportMetadataSchema.parse({
+      reportNumber: "R-2026-001", reportId: "report-1", projectName: "Bridge",
+      testId: "T-9", operator: "Li", notes: "baseline", sourceFile: "test.mp4",
+      generatedAt: "2026-08-02T08:00:00.000Z", buildCommit: "79cf4cb"
+    })).toMatchObject({ reportId: "report-1" });
+    expect(ReportOptionsSchema.parse({
+      includedAssets: ["raw-data", "charts"], keyFrameCount: 12,
+      imageQuality: "full", language: "zh-CN"
+    })).toMatchObject({ keyFrameCount: 12 });
+    expect(QualityThresholdsSchema.safeParse({
+      passValidRatio: .8, reviewValidRatio: .95,
+      passConfidenceP50: .8, reviewConfidenceP50: .55,
+      failLostRatio: .2, reviewDroppedFrameRatio: .1
+    }).success).toBe(false);
+  });
+
+  it("parses legacy manifests and traceable v2 manifests", () => {
+    const legacyPayload = {
+      jobId: "job-1", algorithmVersion: "1.0.0", summary: { tracks: 2 },
+      assets: [{ kind: "csv", path: "tracks.csv" }], parameters: {}
+    };
+    const legacy = ReportManifestSchema.parse(legacyPayload);
+    const current = ReportManifestSchema.parse({
+      schemaVersion: 2,
+      reportId: "report-1",
+      jobId: "job-1",
+      algorithmVersion: "2.0.0",
+      source: { kind: "video", name: "test.mp4" },
+      grade: "review",
+      thresholds: {
+        passValidRatio: .95, reviewValidRatio: .8,
+        passConfidenceP50: .8, reviewConfidenceP50: .55,
+        failLostRatio: .2, reviewDroppedFrameRatio: .1
+      },
+      summary: { tracks: 2 },
+      assets: [{ kind: "csv", path: "tracks.csv", bytes: 40, sha256: "a".repeat(64), status: "generated" }],
+      parameters: {},
+      engine: "opencv-js",
+      originalDimensions: { width: 3840, height: 2160 },
+      processingStats: { processedFrames: 2, droppedFrames: 0, fps: 15, p95LatencyMs: 20, engine: "opencv-js", nativeWidth: 3840, nativeHeight: 2160 },
+      buildCommit: "79cf4cb"
+    });
+
+    expect(legacy.jobId).toBe("job-1");
+    expect(legacy.schemaVersion).toBeUndefined();
+    expect(current).toMatchObject({ schemaVersion: 2, reportId: "report-1", grade: "review" });
+    expect(ReportManifestSchema.safeParse({ ...legacyPayload, schemaVersion: 2 }).success).toBe(false);
+  });
+
+  it("requires report model execution and raw-row residual semantics", () => {
+    const base = {
+      metadata: {
+        reportNumber: "R-2026-001", reportId: "report-1", projectName: "Bridge", testId: "T-9", operator: "Li", notes: "", sourceFile: "test.mp4", generatedAt: "2026-08-02T08:00:00.000Z", buildCommit: "79cf4cb"
+      },
+      thresholds: { passValidRatio: .95, reviewValidRatio: .8, passConfidenceP50: .8, reviewConfidenceP50: .55, failLostRatio: .2, reviewDroppedFrameRatio: .1 },
+      options: { includedAssets: [], keyFrameCount: 20, imageQuality: "full", language: "en" }, grade: "pass",
+      points: [], tracks: [{
+        pointId: "p-1", frame: 0, timestampMs: 0, predicted: { x: 1, y: 2 }, refined: { x: 1, y: 2 },
+        model: "natural-keypoint", confidence: .9, residual: .1, residualSemantics: "matching-error-model-specific",
+        state: "valid", relocationMethod: "none"
+      }], chartSeries: [],
+      registration: { count: 0, acceptedCount: 0, rejectedCount: 0, successRate: 0, meanInlierRatio: null, medianInlierRatio: null, meanReprojectionError: null, p95ReprojectionError: null, methodDistribution: {} },
+      anomalyIntervals: [], risks: [], humanInterventions: [], keyFrames: []
+    };
+    expect(ReportModelSchema.safeParse({ ...base, execution: {} }).success).toBe(false);
+    expect(ReportModelSchema.safeParse({ ...base, execution: {
+      pointCount: 1, frameCount: 1, sampleCount: 1, validRatio: 1, lostRatio: 0, droppedFrameRatio: 0,
+      stateCounts: { valid: 1, suspect: 0, lost: 0, reviewed: 0, paused: 0 },
+      processingStats: { processedFrames: 1, droppedFrames: 0, fps: 15, p95LatencyMs: 20, engine: "typescript", nativeWidth: null, nativeHeight: null }
+    } }).success).toBe(true);
   });
 });

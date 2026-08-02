@@ -1,6 +1,7 @@
 export {
   AnchorCorrespondenceSchema,
   ExtractionIntentSchema,
+  ExportFormatSchema,
   FeatureDraftSchema,
   FeatureRefinementSchema,
   FrameRegistrationSchema,
@@ -14,7 +15,13 @@ export {
   RiskNoticeSchema,
   CameraSessionSchema,
   ProcessingStatsSchema,
+  QualityGradeSchema,
+  QualityThresholdsSchema,
+  ReportMetadataSchema,
   ReportManifestSchema,
+  ReportModelSchema,
+  ReportOptionsSchema,
+  ReportResidualSemanticsSchema,
   RoiSchema,
   TrackingEventSchema,
   TrackingJobSchema
@@ -41,6 +48,13 @@ export type {
   RiskNotice,
   CameraSession,
   ProcessingStats,
+  ExportFormat,
+  QualityGrade,
+  QualityThresholds,
+  ReportMetadata,
+  ReportModel,
+  ReportOptions,
+  ReportResidualSemantics,
   LocalFrame,
   EngineStatus
 } from "./schema";

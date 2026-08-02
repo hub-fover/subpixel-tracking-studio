@@ -1,4 +1,5 @@
 import type { FrameRegistration, MultiPointTrack, PointSeed, PointTrack, ProcessingStats, RecoveryEvent, RiskNotice, Roi, TrackingEvent } from "@subpixel/contracts";
+import { reportResidualSemantics } from "./reportModel";
 
 export type ExportFormat = "json" | "csv" | "xlsx" | "pdf" | "images" | "video";
 export type ExportPayload = {
@@ -33,7 +34,7 @@ export function overlayCanvasSize(source: { width?: number; height?: number; vid
 export function buildExportRows(payload: ExportPayload) {
   if (payload.multiTracks?.length) return [...payload.multiTracks]
     .sort((a, b) => a.frame - b.frame || a.pointId.localeCompare(b.pointId))
-    .map(track => ({ point_id: track.pointId, frame: track.frame, timestamp_ms: track.timestampMs, predicted_x_px: track.predicted.x, predicted_y_px: track.predicted.y, x_px: track.refined.x, y_px: track.refined.y, model: track.model, residual: track.residual, confidence: track.confidence, flow_fb_error: track.flowErrorForwardBackward, ncc: track.ncc, descriptor_distance: track.descriptorDistance, epipolar_error: track.epipolarError, state: track.state, relocation_method: track.relocationMethod }));
+    .map(track => ({ point_id: track.pointId, frame: track.frame, timestamp_ms: track.timestampMs, predicted_x_px: track.predicted.x, predicted_y_px: track.predicted.y, x_px: track.refined.x, y_px: track.refined.y, model: track.model, residual: track.residual, residual_semantics: reportResidualSemantics(track.model), confidence: track.confidence, flow_fb_error: track.flowErrorForwardBackward, ncc: track.ncc, descriptor_distance: track.descriptorDistance, lowe_ratio: track.loweRatio ?? null, epipolar_error: track.epipolarError, state: track.state, relocation_method: track.relocationMethod }));
   return [...payload.tracks].sort((a, b) => a.frame - b.frame).map(track => ({ point_id: "p-001", frame: track.frame, timestamp_ms: track.timestampMs, x_px: track.x, y_px: track.y, model: track.model, residual: track.residual, confidence: track.confidence, state: track.state, duration_ms: track.durationMs }));
 }
 

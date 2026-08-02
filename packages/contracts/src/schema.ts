@@ -9,13 +9,14 @@ const FeatureModelTypeSchema = z.enum([
   "natural-keypoint"
 ]);
 
-const ExportFormatSchema = z.enum([
+export const ExportFormatSchema = z.enum([
   "csv",
   "json",
   "xlsx",
   "pdf",
   "images",
-  "video"
+  "video",
+  "bundle"
 ]);
 
 export const RoiSchema = z.object({
@@ -157,6 +158,7 @@ export const MultiPointTrackSchema = z.object({
   model: FeatureModelTypeSchema,
   confidence: z.number().min(0).max(1),
   residual: z.number().nonnegative(),
+  loweRatio: z.number().min(0).max(1).nullable().optional(),
   flowErrorForwardBackward: z.number().nonnegative().nullable().default(null),
   ncc: z.number().min(-1).max(1).nullable().default(null),
   descriptorDistance: z.number().nonnegative().nullable().default(null),
@@ -279,17 +281,126 @@ export const ProcessingStatsSchema = z.object({
   nativeHeight: z.number().int().positive().nullable()
 });
 
+export const ReportMetadataSchema = z.object({
+  reportNumber: z.string().min(1),
+  reportId: z.string().min(1),
+  projectName: z.string().min(1),
+  testId: z.string().min(1),
+  operator: z.string().min(1),
+  notes: z.string().default(""),
+  sourceFile: z.string().min(1),
+  generatedAt: z.string().datetime({ offset: true }),
+  buildCommit: z.string().min(1)
+});
+
+export const QualityThresholdsSchema = z.object({
+  passValidRatio: z.number().min(0).max(1).default(.95),
+  reviewValidRatio: z.number().min(0).max(1).default(.8),
+  passConfidenceP50: z.number().min(0).max(1).default(.8),
+  reviewConfidenceP50: z.number().min(0).max(1).default(.55),
+  failLostRatio: z.number().min(0).max(1).default(.2),
+  reviewDroppedFrameRatio: z.number().min(0).max(1).default(.1)
+}).superRefine((value, context) => {
+  if (value.reviewValidRatio > value.passValidRatio) context.addIssue({ code: z.ZodIssueCode.custom, path: ["reviewValidRatio"], message: "reviewValidRatio must be <= passValidRatio" });
+  if (value.reviewConfidenceP50 > value.passConfidenceP50) context.addIssue({ code: z.ZodIssueCode.custom, path: ["reviewConfidenceP50"], message: "reviewConfidenceP50 must be <= passConfidenceP50" });
+});
+
+export const QualityGradeSchema = z.enum(["pass", "review", "fail", "not-evaluated"]);
+
+export const ReportOptionsSchema = z.object({
+  includedAssets: z.array(z.string().min(1)).default([]),
+  keyFrameCount: z.number().int().min(0).max(20).default(20),
+  imageQuality: z.enum(["full", "lightweight"]).default("full"),
+  language: z.string().min(1).default("en")
+});
+
+const ReportAssetSchema = z.object({
+  kind: z.string().min(1),
+  path: z.string().min(1),
+  bytes: z.number().int().nonnegative().optional(),
+  sha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
+  status: z.enum(["generated", "failed", "skipped"]).optional(),
+  failureReason: z.string().optional()
+});
+
 export const ReportManifestSchema = z.object({
-  jobId: z.string().min(1),
-  algorithmVersion: z.string().min(1),
-  summary: z.record(z.number()),
-  assets: z.array(
-    z.object({
-      kind: z.string().min(1),
-      path: z.string().min(1)
-    })
-  ),
-  parameters: z.record(z.unknown())
+  schemaVersion: z.union([z.literal(1), z.literal(2)]).optional(),
+  reportId: z.string().min(1).optional(),
+  jobId: z.string().min(1).optional(),
+  algorithmVersion: z.string().min(1).optional(),
+  source: z.object({ kind: z.enum(["image-sequence", "video", "camera"]), name: z.string().min(1) }).optional(),
+  grade: QualityGradeSchema.optional(),
+  thresholds: QualityThresholdsSchema.optional(),
+  summary: z.record(z.number()).default({}),
+  assets: z.array(ReportAssetSchema).default([]),
+  parameters: z.record(z.unknown()).default({}),
+  engine: z.enum(["typescript", "opencv-js", "degraded"]).optional(),
+  originalDimensions: z.object({ width: z.number().int().positive(), height: z.number().int().positive() }).optional(),
+  processingStats: ProcessingStatsSchema.optional(),
+  buildCommit: z.string().min(1).optional()
+}).superRefine((value, context) => {
+  if (value.schemaVersion !== 2) return;
+  for (const field of ["reportId", "jobId", "algorithmVersion", "source", "grade", "thresholds", "engine", "originalDimensions", "processingStats", "buildCommit"] as const) {
+    if (value[field] === undefined) context.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} is required for report manifest v2` });
+  }
+  value.assets.forEach((asset, index) => {
+    if (!asset.status) context.addIssue({ code: z.ZodIssueCode.custom, path: ["assets", index, "status"], message: "status is required for report manifest v2 assets" });
+    if (asset.status === "generated" && asset.bytes === undefined) context.addIssue({ code: z.ZodIssueCode.custom, path: ["assets", index, "bytes"], message: "bytes is required for generated assets" });
+    if (asset.status === "generated" && asset.sha256 === undefined) context.addIssue({ code: z.ZodIssueCode.custom, path: ["assets", index, "sha256"], message: "sha256 is required for generated assets" });
+    if (asset.status === "failed" && !asset.failureReason) context.addIssue({ code: z.ZodIssueCode.custom, path: ["assets", index, "failureReason"], message: "failureReason is required for failed assets" });
+  });
+});
+
+export const ReportResidualSemanticsSchema = z.enum([
+  "geometric-fit-error-px",
+  "line-intersection-fit-error-px",
+  "blob-center-fit-error-px",
+  "matching-error-model-specific"
+]);
+
+const ReportStateCountsSchema = z.object({
+  valid: z.number().int().nonnegative(), suspect: z.number().int().nonnegative(),
+  lost: z.number().int().nonnegative(), reviewed: z.number().int().nonnegative(), paused: z.number().int().nonnegative()
+});
+const ReportExecutionSchema = z.object({
+  pointCount: z.number().int().nonnegative(), frameCount: z.number().int().nonnegative(), sampleCount: z.number().int().nonnegative(),
+  stateCounts: ReportStateCountsSchema, validRatio: z.number().min(0).max(1), lostRatio: z.number().min(0).max(1),
+  droppedFrameRatio: z.number().min(0).max(1), processingStats: ProcessingStatsSchema
+});
+const ReportCoordinateSchema = PointSchema.nullable();
+const ReportRangeSchema = z.object({ min: z.number().finite(), max: z.number().finite() }).nullable();
+const ReportPointSchema = z.object({
+  pointId: z.string().min(1), model: FeatureModelTypeSchema.nullable(), grade: QualityGradeSchema,
+  finalState: z.enum(["valid", "suspect", "lost", "reviewed", "paused"]).nullable(), sampleCount: z.number().int().nonnegative(),
+  stateCounts: ReportStateCountsSchema, validRatio: z.number().min(0).max(1), lostRatio: z.number().min(0).max(1),
+  start: ReportCoordinateSchema, end: ReportCoordinateSchema, dx: z.number().finite().nullable(), dy: z.number().finite().nullable(),
+  xRange: ReportRangeSchema, yRange: ReportRangeSchema,
+  confidence: z.object({ p50: z.number().min(0).max(1).nullable(), p95: z.number().min(0).max(1).nullable() }),
+  gatingFailures: z.record(z.number().int().nonnegative()), relocationMethods: z.record(z.number().int().nonnegative())
+});
+const ReportTrackSchema = MultiPointTrackSchema.extend({ residualSemantics: ReportResidualSemanticsSchema });
+const ReportChartSampleSchema = z.object({ pointId: z.string().min(1), frame: z.number().int().nonnegative(), x: z.number().finite(), y: z.number().finite(), dx: z.number().finite().nullable(), dy: z.number().finite().nullable(), confidence: z.number().min(0).max(1), residual: z.number().nonnegative() });
+const ReportRegistrationSchema = z.object({
+  count: z.number().int().nonnegative(), acceptedCount: z.number().int().nonnegative(), rejectedCount: z.number().int().nonnegative(), successRate: z.number().min(0).max(1),
+  meanInlierRatio: z.number().min(0).max(1).nullable(), medianInlierRatio: z.number().min(0).max(1).nullable(), meanReprojectionError: z.number().nonnegative().nullable(), p95ReprojectionError: z.number().nonnegative().nullable(), methodDistribution: z.record(z.number().int().nonnegative())
+});
+const ReportAnomalyIntervalSchema = z.object({ pointId: z.string().min(1), startFrame: z.number().int().nonnegative(), endFrame: z.number().int().nonnegative(), frameCount: z.number().int().positive(), worstState: z.enum(["valid", "suspect", "lost", "reviewed", "paused"]), minimumConfidence: z.number().min(0).max(1), maximumResidual: z.number().nonnegative() });
+const ReportKeyFrameSchema = z.object({ pointId: z.string().min(1), frame: z.number().int().nonnegative(), reason: z.enum(["regular", "abnormal-boundary"]), track: ReportTrackSchema });
+
+export const ReportModelSchema = z.object({
+  metadata: ReportMetadataSchema,
+  thresholds: QualityThresholdsSchema,
+  options: ReportOptionsSchema,
+  grade: QualityGradeSchema,
+  execution: ReportExecutionSchema,
+  points: z.array(ReportPointSchema),
+  tracks: z.array(ReportTrackSchema),
+  chartSeries: z.array(z.object({ pointId: z.string().min(1), samples: z.array(ReportChartSampleSchema).max(1000) })),
+  registration: ReportRegistrationSchema,
+  anomalyIntervals: z.array(ReportAnomalyIntervalSchema),
+  risks: z.array(RiskNoticeSchema),
+  humanInterventions: z.array(z.record(z.unknown())),
+  keyFrames: z.array(ReportKeyFrameSchema)
 });
 
 export type Roi = z.infer<typeof RoiSchema>;
@@ -301,6 +412,13 @@ export type TrackingJob = z.infer<typeof TrackingJobSchema>;
 export type PointTrack = z.infer<typeof PointTrackSchema>;
 export type TrackingEvent = z.infer<typeof TrackingEventSchema>;
 export type ReportManifest = z.infer<typeof ReportManifestSchema>;
+export type ExportFormat = z.infer<typeof ExportFormatSchema>;
+export type ReportMetadata = z.infer<typeof ReportMetadataSchema>;
+export type QualityThresholds = z.infer<typeof QualityThresholdsSchema>;
+export type QualityGrade = z.infer<typeof QualityGradeSchema>;
+export type ReportOptions = z.infer<typeof ReportOptionsSchema>;
+export type ReportResidualSemantics = z.infer<typeof ReportResidualSemanticsSchema>;
+export type ReportModel = z.infer<typeof ReportModelSchema>;
 export type FeatureModelType = z.infer<typeof FeatureModelTypeSchema>;
 export type Point = z.infer<typeof PointSchema>;
 export type PointSeed = z.infer<typeof PointSeedSchema>;
