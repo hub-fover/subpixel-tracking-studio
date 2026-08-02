@@ -197,6 +197,12 @@ describe("report model", () => {
     expect(report.humanInterventions).toContainEqual(expect.objectContaining({ kind: "manual-relocation", pointId: "p-1", frame: 2 }));
   });
 
+  it("excludes non-finite registration errors from aggregate statistics", () => {
+    const input = snapshot([seed("p-1")], [track("p-1", 1)]);
+    input.registrations = [{ frame: 1, method: "sift-ransac", inlierCount: 1, matchCount: 1, inlierRatio: .5, medianReprojectionError: Number.POSITIVE_INFINITY }];
+    expect(buildReportModel(input, metadata).registration).toMatchObject({ meanReprojectionError: null, p95ReprojectionError: null });
+  });
+
   it("samples dense anomaly boundaries across the timeline within the key-frame cap", () => {
     const tracks = Array.from({ length: 60 }, (_, frame) => track("p-1", frame, { state: frame % 2 ? "suspect" : "valid" }));
     const frames = buildReportModel(snapshot([seed("p-1")], tracks), metadata).keyFrames.map(item => item.frame);
