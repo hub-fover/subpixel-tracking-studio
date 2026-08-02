@@ -250,6 +250,7 @@ describe("report contracts", () => {
     expect(legacy.schemaVersion).toBeUndefined();
     expect(current).toMatchObject({ schemaVersion: 2, reportId: "report-1", grade: "review" });
     expect(ReportManifestSchema.safeParse({ ...legacyPayload, schemaVersion: 2 }).success).toBe(false);
+    expect(ReportManifestSchema.safeParse({}).success).toBe(false);
   });
 
   it("requires report model execution and raw-row residual semantics", () => {

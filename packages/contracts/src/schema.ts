@@ -158,6 +158,12 @@ export const MultiPointTrackSchema = z.object({
   model: FeatureModelTypeSchema,
   confidence: z.number().min(0).max(1),
   residual: z.number().nonnegative(),
+  residualSemantics: z.enum([
+    "geometric-fit-error-px",
+    "line-intersection-fit-error-px",
+    "blob-center-fit-error-px",
+    "matching-error-model-specific"
+  ]).optional(),
   loweRatio: z.number().min(0).max(1).nullable().optional(),
   flowErrorForwardBackward: z.number().nonnegative().nullable().default(null),
   ncc: z.number().min(-1).max(1).nullable().default(null),
@@ -331,16 +337,22 @@ export const ReportManifestSchema = z.object({
   source: z.object({ kind: z.enum(["image-sequence", "video", "camera"]), name: z.string().min(1) }).optional(),
   grade: QualityGradeSchema.optional(),
   thresholds: QualityThresholdsSchema.optional(),
-  summary: z.record(z.number()).default({}),
-  assets: z.array(ReportAssetSchema).default([]),
-  parameters: z.record(z.unknown()).default({}),
+  summary: z.record(z.number()).optional(),
+  assets: z.array(ReportAssetSchema).optional(),
+  parameters: z.record(z.unknown()).optional(),
   engine: z.enum(["typescript", "opencv-js", "degraded"]).optional(),
   originalDimensions: z.object({ width: z.number().int().positive(), height: z.number().int().positive() }).optional(),
   processingStats: ProcessingStatsSchema.optional(),
   buildCommit: z.string().min(1).optional()
 }).superRefine((value, context) => {
-  if (value.schemaVersion !== 2) return;
-  for (const field of ["reportId", "jobId", "algorithmVersion", "source", "grade", "thresholds", "engine", "originalDimensions", "processingStats", "buildCommit"] as const) {
+  const requiredV2 = ["reportId", "jobId", "algorithmVersion", "source", "grade", "thresholds", "engine", "originalDimensions", "processingStats", "buildCommit", "assets", "parameters"] as const;
+  if (value.schemaVersion !== 2) {
+    for (const field of ["jobId", "algorithmVersion", "summary", "assets", "parameters"] as const) {
+      if (value[field] === undefined) context.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} is required for legacy report manifests` });
+    }
+    return;
+  }
+  for (const field of requiredV2) {
     if (value[field] === undefined) context.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} is required for report manifest v2` });
   }
   value.assets.forEach((asset, index) => {

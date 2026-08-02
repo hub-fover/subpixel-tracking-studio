@@ -144,6 +144,23 @@ describe("report model", () => {
     }
   });
 
+  it("keeps every seed when active ids are partial and summarizes abnormal coordinates", () => {
+    const first = seed("p-1");
+    const second = seed("p-2");
+    second.quality = { confidence: .7, residualPx: .2, gates: { edge: false } };
+    const report = buildReportModel({
+      ...snapshot([first, second], [
+        track("p-1", 1, { state: "suspect", refined: { x: 4, y: 5 } }),
+        track("p-1", 2, { state: "lost", refined: { x: 8, y: 9 } })
+      ]),
+      activePointIds: ["p-1"]
+    }, metadata);
+
+    expect(report.points.map(point => point.pointId)).toEqual(["p-1", "p-2"]);
+    expect(report.points[0]).toMatchObject({ start: { x: 4, y: 5 }, end: { x: 8, y: 9 }, dx: 4, dy: 4, xRange: { min: 4, max: 8 }, yRange: { min: 5, max: 9 } });
+    expect(report.points[1].gatingFailures).toEqual({ edge: 1 });
+  });
+
   it("degrades pass results for recovery, rejected registration, error risks, and dropped frames", () => {
     const base = snapshot([seed("p-1")], Array.from({ length: 10 }, (_, frame) => track("p-1", frame)));
     const recovery: ReportSnapshot = { ...base, recoveryEvents: [{ id: "r-1", frame: 4, kind: "applied", anchorCount: 3, coverage: .5, inlierRatio: .8, predictedMedianError: 1, reversible: true }] };

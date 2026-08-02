@@ -162,7 +162,11 @@ function overallGrade(input: { points: ReportPoint[]; tracks: ReportTrack[]; thr
 export function buildReportModel(snapshot: ReportSnapshot, metadata: ReportMetadata, thresholdOverrides?: Partial<QualityThresholds>, optionOverrides?: Partial<ReportOptions>): ReportModelResult {
   const thresholds = validateThresholds(thresholdOverrides);
   const options = ReportOptionsSchema.parse(optionOverrides ?? {});
-  const pointIds = [...new Set([...(snapshot.activePointIds ?? snapshot.seeds.map(seed => seed.pointId)), ...snapshot.tracksByPoint.keys()])].sort((a, b) => a.localeCompare(b));
+  const pointIds = [...new Set([
+    ...snapshot.seeds.map(seed => seed.pointId),
+    ...(snapshot.activePointIds ?? []),
+    ...snapshot.tracksByPoint.keys()
+  ])].sort((a, b) => a.localeCompare(b));
   const seedById = new Map(snapshot.seeds.map(seed => [seed.pointId, seed]));
   const rawTracks = [...snapshot.tracksByPoint.values()].flat().map(track => MultiPointTrackSchema.parse(track) as MultiPointTrack).sort((a, b) => a.pointId.localeCompare(b.pointId) || a.frame - b.frame);
   const tracks = rawTracks.map(track => ({ ...track, residualSemantics: reportResidualSemantics(track.model) }));
@@ -170,11 +174,15 @@ export function buildReportModel(snapshot: ReportSnapshot, metadata: ReportMetad
     const rows = tracks.filter(track => track.pointId === pointId);
     const validRows = rows.filter(row => row.state === "valid");
     const states = normalizeStateCounts(rows.map(row => row.state));
-    const xValues = validRows.map(row => row.refined.x);
-    const yValues = validRows.map(row => row.refined.y);
-    const first = validRows[0];
-    const last = validRows.at(-1);
-    const gates = counts(snapshot.riskNotices.filter(notice => notice.pointId === pointId && (notice.code.includes("gate") || notice.code.includes("identity"))).map(notice => notice.code));
+    const xValues = rows.map(row => row.refined.x);
+    const yValues = rows.map(row => row.refined.y);
+    const first = rows[0];
+    const last = rows.at(-1);
+    const seedGates = seedById.get(pointId)?.quality?.gates ?? {};
+    const gates = counts([
+      ...Object.entries(seedGates).filter(([, passed]) => passed === false).map(([name]) => name),
+      ...snapshot.riskNotices.filter(notice => notice.pointId === pointId && (notice.code.includes("gate") || notice.code.includes("identity"))).map(notice => notice.code)
+    ]);
     return {
       pointId,
       model: seedById.get(pointId)?.model ?? rows[0]?.model ?? null,
