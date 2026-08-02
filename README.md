@@ -47,7 +47,7 @@ python -m venv .venv
 
 [一键打开 GitHub Codespace](https://github.com/codespaces/new?repo=hub-fover/subpixel-tracking-studio)
 
-GitHub Pages 当前提供前端工作台预览。完整的原图精修和大角度场景配准需要同时部署 FastAPI 服务，并将前端构建变量 `VITE_API_BASE` 指向 API 地址。
+GitHub Pages 当前提供前端工作台预览。首次启用时，在仓库 `Settings → Pages` 选择 `Deploy from a branch`、分支 `gh-pages`、目录 `/ (root)`。完整的原图精修和大角度场景配准需要同时部署 FastAPI 服务，并将前端构建变量 `VITE_API_BASE` 指向 API 地址。
 
 ## API
 
