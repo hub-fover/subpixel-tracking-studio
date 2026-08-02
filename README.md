@@ -42,6 +42,18 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir services/api --host 127.0.0.1 --port 8001
 ```
 
+## 详细报告中心
+
+完成点确认后点击画布右上角的“报告”打开报告中心。报告中心会冻结当前点集、逐帧轨迹、场景配准、风险和人工干预；跟踪继续运行不会修改当前快照，点击“刷新数据快照”才会重新取数。
+
+- “概览”显示合格、需复核、不合格或未评估结论，并给出有效率、失锁率、帧数、延迟和异常区间。
+- “点质量”保留每个 `pointId` 的坐标、位移、置信度、状态和重定位方法；原始逐帧数据不会被图表采样裁剪。
+- “导出设置”可以填写项目名称、试验编号、操作人、备注并调整质量阈值。设置只保存在本机浏览器。
+- “生成 ZIP 报告包”包含中文 PDF、XLSX、JSON、points/tracks/registrations/events/risks 分表 CSV、manifest v2 和带标注图像。单项 PDF/XLSX/JSON 入口仍然可用。
+- 质量等级只代表算法门控结果；没有相机标定、物理尺度和计量溯源时，不作为计量检定结论。
+
+报告使用自托管 Noto Sans SC 字体，字体和 OFL 许可证位于 `apps/web/public/fonts/`。如果字体、Canvas、PDF、XLSX、哈希或 ZIP 生成失败，报告中心会保留已成功资产并显示失败原因，不会静默省略数据。
+
 ## GitHub Pages
 
 Actions 构建 `apps/web`，复制自托管 OpenCV.js，并发布到 `gh-pages` 分支。仓库 Pages 源配置为 `gh-pages` / `/ (root)`。

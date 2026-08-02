@@ -5,4 +5,5 @@ packages:
 onlyBuiltDependencies:
   - esbuild
 allowBuilds:
-  esbuild: set this to true or false
+  core-js: false
+  esbuild: true

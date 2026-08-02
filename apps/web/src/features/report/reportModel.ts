@@ -14,7 +14,8 @@ import {
   type ReportResidualSemantics,
   type RecoveryEvent,
   type RiskNotice,
-  type ProcessingStats
+  type ProcessingStats,
+  type TrackingEvent
 } from "@subpixel/contracts";
 
 export const DEFAULT_QUALITY_THRESHOLDS: QualityThresholds = {
@@ -30,6 +31,7 @@ export type ReportSnapshot = {
   seeds: PointSeed[];
   tracksByPoint: Map<string, MultiPointTrack[]>;
   registrations: FrameRegistration[];
+  events?: TrackingEvent[];
   recoveryEvents: RecoveryEvent[];
   riskNotices: RiskNotice[];
   processingStats: ProcessingStats;
@@ -185,6 +187,7 @@ export function buildReportModel(snapshot: ReportSnapshot, metadata: ReportMetad
     ]);
     return {
       pointId,
+      groupId: seedById.get(pointId)?.groupId ?? null,
       model: seedById.get(pointId)?.model ?? rows[0]?.model ?? null,
       grade: "not-evaluated",
       finalState: rows.at(-1)?.state ?? null,
@@ -251,6 +254,15 @@ export function buildReportModel(snapshot: ReportSnapshot, metadata: ReportMetad
   return {
     metadata, thresholds, options, grade,
     execution: { pointCount: pointIds.length, frameCount: frameSet.size, sampleCount: tracks.length, stateCounts, validRatio: tracks.length ? stateCounts.valid / tracks.length : 0, lostRatio: tracks.length ? (stateCounts.lost + stateCounts.paused) / tracks.length : 0, droppedFrameRatio, processingStats: processing },
-    points: pointReports, tracks, chartSeries, registration, anomalyIntervals: intervals, risks, humanInterventions, keyFrames
+    points: pointReports,
+    tracks,
+    registrations,
+    events: snapshot.events ?? [],
+    chartSeries,
+    registration,
+    anomalyIntervals: intervals,
+    risks,
+    humanInterventions,
+    keyFrames
   };
 }

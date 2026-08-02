@@ -251,6 +251,7 @@ describe("report contracts", () => {
     expect(current).toMatchObject({ schemaVersion: 2, reportId: "report-1", grade: "review" });
     expect(ReportManifestSchema.safeParse({ ...legacyPayload, schemaVersion: 2 }).success).toBe(false);
     expect(ReportManifestSchema.safeParse({}).success).toBe(false);
+    expect(ReportManifestSchema.safeParse({ schemaVersion: 1 }).success).toBe(false);
   });
 
   it("requires report model execution and raw-row residual semantics", () => {
@@ -264,7 +265,7 @@ describe("report contracts", () => {
         pointId: "p-1", frame: 0, timestampMs: 0, predicted: { x: 1, y: 2 }, refined: { x: 1, y: 2 },
         model: "natural-keypoint", confidence: .9, residual: .1, residualSemantics: "matching-error-model-specific",
         state: "valid", relocationMethod: "none"
-      }], chartSeries: [],
+      }], registrations: [], events: [], chartSeries: [],
       registration: { count: 0, acceptedCount: 0, rejectedCount: 0, successRate: 0, meanInlierRatio: null, medianInlierRatio: null, meanReprojectionError: null, p95ReprojectionError: null, methodDistribution: {} },
       anomalyIntervals: [], risks: [], humanInterventions: [], keyFrames: []
     };

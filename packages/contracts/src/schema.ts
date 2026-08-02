@@ -355,7 +355,7 @@ export const ReportManifestSchema = z.object({
   for (const field of requiredV2) {
     if (value[field] === undefined) context.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} is required for report manifest v2` });
   }
-  value.assets.forEach((asset, index) => {
+  value.assets?.forEach((asset, index) => {
     if (!asset.status) context.addIssue({ code: z.ZodIssueCode.custom, path: ["assets", index, "status"], message: "status is required for report manifest v2 assets" });
     if (asset.status === "generated" && asset.bytes === undefined) context.addIssue({ code: z.ZodIssueCode.custom, path: ["assets", index, "bytes"], message: "bytes is required for generated assets" });
     if (asset.status === "generated" && asset.sha256 === undefined) context.addIssue({ code: z.ZodIssueCode.custom, path: ["assets", index, "sha256"], message: "sha256 is required for generated assets" });
@@ -382,7 +382,7 @@ const ReportExecutionSchema = z.object({
 const ReportCoordinateSchema = PointSchema.nullable();
 const ReportRangeSchema = z.object({ min: z.number().finite(), max: z.number().finite() }).nullable();
 const ReportPointSchema = z.object({
-  pointId: z.string().min(1), model: FeatureModelTypeSchema.nullable(), grade: QualityGradeSchema,
+  pointId: z.string().min(1), groupId: z.string().min(1).nullable(), model: FeatureModelTypeSchema.nullable(), grade: QualityGradeSchema,
   finalState: z.enum(["valid", "suspect", "lost", "reviewed", "paused"]).nullable(), sampleCount: z.number().int().nonnegative(),
   stateCounts: ReportStateCountsSchema, validRatio: z.number().min(0).max(1), lostRatio: z.number().min(0).max(1),
   start: ReportCoordinateSchema, end: ReportCoordinateSchema, dx: z.number().finite().nullable(), dy: z.number().finite().nullable(),
@@ -407,6 +407,8 @@ export const ReportModelSchema = z.object({
   execution: ReportExecutionSchema,
   points: z.array(ReportPointSchema),
   tracks: z.array(ReportTrackSchema),
+  registrations: z.array(FrameRegistrationSchema),
+  events: z.array(TrackingEventSchema),
   chartSeries: z.array(z.object({ pointId: z.string().min(1), samples: z.array(ReportChartSampleSchema).max(1000) })),
   registration: ReportRegistrationSchema,
   anomalyIntervals: z.array(ReportAnomalyIntervalSchema),

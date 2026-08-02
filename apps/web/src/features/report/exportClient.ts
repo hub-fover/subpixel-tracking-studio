@@ -1,7 +1,8 @@
-import type { FrameRegistration, MultiPointTrack, PointSeed, PointTrack, ProcessingStats, RecoveryEvent, RiskNotice, Roi, TrackingEvent } from "@subpixel/contracts";
+import type { ExportFormat as ContractExportFormat, FrameRegistration, MultiPointTrack, PointSeed, PointTrack, ProcessingStats, RecoveryEvent, RiskNotice, Roi, TrackingEvent, ReportModel } from "@subpixel/contracts";
 import { reportResidualSemantics } from "./reportModel";
+import { buildReportBundle, buildReportPdf, buildReportXlsx, reportFileStem, reportJson } from "./reportExport";
 
-export type ExportFormat = "json" | "csv" | "xlsx" | "pdf" | "images" | "video";
+export type ExportFormat = ContractExportFormat;
 export type ExportPayload = {
   tracks: PointTrack[];
   multiTracks?: MultiPointTrack[];
@@ -11,6 +12,7 @@ export type ExportPayload = {
   recoveryEvents?: RecoveryEvent[];
   riskNotices?: RiskNotice[];
   processingStats?: ProcessingStats;
+  reportModel?: ReportModel;
   events: TrackingEvent[];
   roi: Roi;
   model: string;
@@ -74,6 +76,18 @@ export async function exportTracking(format: ExportFormat, payload: ExportPayloa
   const points = payload.points ?? payload.seeds ?? [];
   if (!points.length && !payload.tracks.length && !payload.multiTracks?.length) throw Object.assign(new Error("娌℃湁鍙鍑虹殑鎻愮偣缁撴灉"), { code: "export.empty", recoverable: true });
   const document = buildExportDocument(payload); const data = buildExportRows(payload);
+  if (format === "bundle") {
+    if (!payload.reportModel) throw Object.assign(new Error("请先打开报告中心生成冻结报告数据"), { code: "export.report-required", recoverable: true });
+    let annotated: HTMLCanvasElement | undefined;
+    let annotatedDataUrl: string | undefined;
+    try { annotated = payload.image ? markedCanvas(payload) : undefined; annotatedDataUrl = annotated?.toDataURL("image/png"); } catch { annotated = undefined; }
+    const assets = annotated ? await new Promise<Blob[]>((resolve, reject) => { annotated.toBlob(blob => blob ? resolve([blob]) : reject(new Error("标注图生成失败")), "image/png"); }) : [];
+    const { blob } = await buildReportBundle(payload.reportModel, assets.length ? [{ kind: "image", path: "media/reference-points.png", data: assets[0] }, { kind: "image", path: "media/current-tracks.png", data: assets[0] }] : [{ kind: "image", path: "media/reference-points.png", error: "没有可用原图" }, { kind: "image", path: "media/current-tracks.png", error: "没有可用当前帧" }], annotatedDataUrl);
+    return download(blob, `${reportFileStem(payload.reportModel)}.zip`);
+  }
+  if (payload.reportModel && format === "pdf") { let imageData: string | undefined; try { imageData = payload.image ? markedCanvas(payload).toDataURL("image/png") : undefined; } catch { imageData = undefined; } return download(await buildReportPdf(payload.reportModel, imageData), `${reportFileStem(payload.reportModel)}.pdf`); }
+  if (payload.reportModel && format === "xlsx") return download(await buildReportXlsx(payload.reportModel), `${reportFileStem(payload.reportModel)}.xlsx`);
+  if (payload.reportModel && format === "json") return download(new Blob([reportJson(payload.reportModel)], { type: "application/json" }), `${reportFileStem(payload.reportModel)}.json`);
   if (format === "json") return download(new Blob([JSON.stringify({ generatedAt: new Date().toISOString(), ...document }, null, 2)], { type: "application/json" }), "subpixel-results.json");
   if (format === "csv") {
     const records = [...document.points.map(row => ({ record_type: "point", ...row })), ...document.tracks, ...document.registrations, ...document.recoveryEvents, ...document.events, ...document.riskNotices, ...(document.processingStats ? [document.processingStats] : [])];

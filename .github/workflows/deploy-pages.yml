@@ -33,6 +33,7 @@ jobs:
       - name: Build frontend
         env:
           VITE_BASE_PATH: /subpixel-tracking-studio/
+          VITE_COMMIT_SHA: ${{ github.sha }}
         run: pnpm --filter @subpixel/web build
       - name: Publish gh-pages branch
         uses: peaceiris/actions-gh-pages@v4

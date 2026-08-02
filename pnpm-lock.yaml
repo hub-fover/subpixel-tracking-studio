@@ -54,6 +54,9 @@ importers:
       '@techstark/opencv-js':
         specifier: 4.10.0-release.1
         version: 4.10.0-release.1
+      fflate:
+        specifier: 0.8.3
+        version: 0.8.3
       jspdf:
         specifier: ^2.5.2
         version: 2.5.2
