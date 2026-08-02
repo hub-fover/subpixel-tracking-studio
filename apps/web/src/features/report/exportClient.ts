@@ -1,6 +1,6 @@
 import type { ExportFormat as ContractExportFormat, FrameRegistration, MultiPointTrack, PointSeed, PointTrack, ProcessingStats, RecoveryEvent, RiskNotice, Roi, TrackingEvent, ReportModel } from "@subpixel/contracts";
 import { reportResidualSemantics } from "./reportModel";
-import { buildReportBundle, buildReportPdf, buildReportXlsx, reportFileStem, reportJson } from "./reportExport";
+import { buildReportBundle, buildReportPdf, buildReportXlsx, reportFileStem, reportJson, type ReportBuildOptions } from "./reportExport";
 
 export type ExportFormat = ContractExportFormat;
 export type ExportPayload = {
@@ -17,7 +17,12 @@ export type ExportPayload = {
   roi: Roi;
   model: string;
   image?: CanvasImageSource;
+  referenceImage?: CanvasImageSource;
+  currentImage?: CanvasImageSource;
 };
+
+export type ExportOptions = ReportBuildOptions;
+export type ExportResult = { manifest?: import("@subpixel/contracts").ReportManifest };
 
 export type ExportDocument = {
   points: Array<Record<string, unknown>>;
@@ -61,10 +66,10 @@ export function buildExportDocument(payload: Pick<ExportPayload, "points" | "see
 
 function download(blob: Blob, name: string) { const anchor = document.createElement("a"); anchor.href = URL.createObjectURL(blob); anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(anchor.href), 1000); }
 
-function markedCanvas(payload: ExportPayload) {
-  const source = payload.image as { width?: number; height?: number; videoWidth?: number; videoHeight?: number } | undefined;
+function markedCanvas(payload: ExportPayload, image = payload.currentImage ?? payload.image) {
+  const source = image as { width?: number; height?: number; videoWidth?: number; videoHeight?: number } | undefined;
   const size = overlayCanvasSize(source ?? {}); const canvas = document.createElement("canvas"); canvas.width = size.width; canvas.height = size.height;
-  const ctx = canvas.getContext("2d")!; ctx.fillStyle = "#111820"; ctx.fillRect(0, 0, size.width, size.height); if (payload.image) ctx.drawImage(payload.image, 0, 0, size.width, size.height);
+  const ctx = canvas.getContext("2d")!; ctx.fillStyle = "#111820"; ctx.fillRect(0, 0, size.width, size.height); if (image) ctx.drawImage(image, 0, 0, size.width, size.height);
   ctx.strokeStyle = "#f5b700"; ctx.lineWidth = Math.max(1, size.width / 3000); ctx.strokeRect(payload.roi.x, payload.roi.y, payload.roi.width, payload.roi.height);
   ctx.strokeStyle = "#00d4bd"; for (const track of payload.multiTracks ?? []) { ctx.beginPath(); ctx.arc(track.refined.x, track.refined.y, Math.max(2, size.width / 1200), 0, Math.PI * 2); ctx.stroke(); }
   for (const track of payload.tracks) { ctx.beginPath(); ctx.arc(track.x, track.y, Math.max(2, size.width / 1200), 0, Math.PI * 2); ctx.stroke(); }
@@ -72,30 +77,42 @@ function markedCanvas(payload: ExportPayload) {
   return canvas;
 }
 
-export async function exportTracking(format: ExportFormat, payload: ExportPayload) {
+export async function exportTracking(format: ExportFormat, payload: ExportPayload, options: ExportOptions = {}): Promise<ExportResult | undefined> {
   const points = payload.points ?? payload.seeds ?? [];
   if (!points.length && !payload.tracks.length && !payload.multiTracks?.length) throw Object.assign(new Error("娌℃湁鍙鍑虹殑鎻愮偣缁撴灉"), { code: "export.empty", recoverable: true });
   const document = buildExportDocument(payload); const data = buildExportRows(payload);
   if (format === "bundle") {
     if (!payload.reportModel) throw Object.assign(new Error("请先打开报告中心生成冻结报告数据"), { code: "export.report-required", recoverable: true });
-    let annotated: HTMLCanvasElement | undefined;
-    let annotatedDataUrl: string | undefined;
-    try { annotated = payload.image ? markedCanvas(payload) : undefined; annotatedDataUrl = annotated?.toDataURL("image/png"); } catch { annotated = undefined; }
-    const assets = annotated ? await new Promise<Blob[]>((resolve, reject) => { annotated.toBlob(blob => blob ? resolve([blob]) : reject(new Error("标注图生成失败")), "image/png"); }) : [];
-    const { blob } = await buildReportBundle(payload.reportModel, assets.length ? [{ kind: "image", path: "media/reference-points.png", data: assets[0] }, { kind: "image", path: "media/current-tracks.png", data: assets[0] }] : [{ kind: "image", path: "media/reference-points.png", error: "没有可用原图" }, { kind: "image", path: "media/current-tracks.png", error: "没有可用当前帧" }], annotatedDataUrl);
-    return download(blob, `${reportFileStem(payload.reportModel)}.zip`);
+    const toPng = async (source: CanvasImageSource | undefined): Promise<Blob | undefined> => {
+      if (!source) return undefined;
+      const canvas = markedCanvas(payload, source);
+      return new Promise<Blob | undefined>(resolve => canvas.toBlob(blob => resolve(blob ?? undefined), "image/png"));
+    };
+    let reference: Blob | undefined;
+    let current: Blob | undefined;
+    try { reference = await toPng(payload.referenceImage ?? payload.image); } catch { reference = undefined; }
+    try { current = await toPng(payload.currentImage ?? payload.image); } catch { current = undefined; }
+    const assets = [
+      reference ? { kind: "image", path: "media/reference-points.png", data: reference } : { kind: "image", path: "media/reference-points.png", error: "没有可用参考帧" },
+      current ? { kind: "image", path: "media/current-tracks.png", data: current } : { kind: "image", path: "media/current-tracks.png", error: "没有可用当前帧" }
+    ];
+    const annotatedDataUrl = current ? await new Promise<string | undefined>(resolve => { const reader = new FileReader(); reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : undefined); reader.onerror = () => resolve(undefined); reader.readAsDataURL(current); }) : undefined;
+    const { blob, manifest } = await buildReportBundle(payload.reportModel, assets, annotatedDataUrl, options);
+    download(blob, `${reportFileStem(payload.reportModel)}.zip`);
+    return { manifest };
   }
-  if (payload.reportModel && format === "pdf") { let imageData: string | undefined; try { imageData = payload.image ? markedCanvas(payload).toDataURL("image/png") : undefined; } catch { imageData = undefined; } return download(await buildReportPdf(payload.reportModel, imageData), `${reportFileStem(payload.reportModel)}.pdf`); }
-  if (payload.reportModel && format === "xlsx") return download(await buildReportXlsx(payload.reportModel), `${reportFileStem(payload.reportModel)}.xlsx`);
-  if (payload.reportModel && format === "json") return download(new Blob([reportJson(payload.reportModel)], { type: "application/json" }), `${reportFileStem(payload.reportModel)}.json`);
-  if (format === "json") return download(new Blob([JSON.stringify({ generatedAt: new Date().toISOString(), ...document }, null, 2)], { type: "application/json" }), "subpixel-results.json");
+  if (payload.reportModel && format === "pdf") { let imageData: string | undefined; try { imageData = (payload.currentImage ?? payload.image) ? markedCanvas(payload, payload.currentImage ?? payload.image).toDataURL("image/png") : undefined; } catch { imageData = undefined; } download(await buildReportPdf(payload.reportModel, imageData, options), `${reportFileStem(payload.reportModel)}.pdf`); return undefined; }
+  if (payload.reportModel && format === "xlsx") { download(await buildReportXlsx(payload.reportModel, options), `${reportFileStem(payload.reportModel)}.xlsx`); return undefined; }
+  if (payload.reportModel && format === "json") { download(new Blob([reportJson(payload.reportModel)], { type: "application/json" }), `${reportFileStem(payload.reportModel)}.json`); return undefined; }
+  if (format === "json") { download(new Blob([JSON.stringify({ generatedAt: new Date().toISOString(), ...document }, null, 2)], { type: "application/json" }), "subpixel-results.json"); return undefined; }
   if (format === "csv") {
     const records = [...document.points.map(row => ({ record_type: "point", ...row })), ...document.tracks, ...document.registrations, ...document.recoveryEvents, ...document.events, ...document.riskNotices, ...(document.processingStats ? [document.processingStats] : [])];
     const columns = [...new Set(records.flatMap(row => Object.keys(row)))]; const csv = [columns.join(","), ...records.map(row => { const record = row as Record<string, unknown>; return columns.map(column => JSON.stringify(record[column] ?? "")).join(","); })].join("\n");
-    return download(new Blob([csv], { type: "text/csv;charset=utf-8" }), "subpixel-results.csv");
+    download(new Blob([`\ufeff${csv}`], { type: "text/csv;charset=utf-8" }), "subpixel-results.csv"); return undefined;
   }
   if (format === "xlsx") { const XLSX = await import("xlsx"); const workbook = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(document.points), "points"); XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(document.tracks), "tracks"); XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(document.registrations), "registrations"); XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet([...document.recoveryEvents, ...document.events, ...document.riskNotices, ...(document.processingStats ? [document.processingStats] : [])]), "events"); XLSX.writeFile(workbook, "subpixel-results.xlsx"); return; }
-  if (format === "pdf") { const { jsPDF } = await import("jspdf"); const doc = new jsPDF({ orientation: "landscape" }); doc.setFontSize(18); doc.text("Subpixel Multi-point Tracking Report", 14, 16); doc.setFontSize(10); doc.text(`Points: ${document.points.length}  Samples: ${data.length}`, 14, 25); doc.addImage(markedCanvas(payload).toDataURL("image/jpeg", .85), "JPEG", 14, 32, 170, 106); doc.save("subpixel-report.pdf"); return; }
-  const canvas = markedCanvas(payload); if (format === "images") return canvas.toBlob(blob => blob && download(blob, "subpixel-overlay.png"), "image/png");
+  if (format === "pdf") { const { jsPDF } = await import("jspdf"); const doc = new jsPDF({ orientation: "landscape" }); doc.setFontSize(18); doc.text("Subpixel Multi-point Tracking Report", 14, 16); doc.setFontSize(10); doc.text(`Points: ${document.points.length}  Samples: ${data.length}`, 14, 25); doc.addImage(markedCanvas(payload).toDataURL("image/jpeg", .85), "JPEG", 14, 32, 170, 106); doc.save("subpixel-report.pdf"); return undefined; }
+  const canvas = markedCanvas(payload); if (format === "images") { canvas.toBlob(blob => blob && download(blob, "subpixel-overlay.png"), "image/png"); return undefined; }
   const stream = canvas.captureStream(10); const recorder = new MediaRecorder(stream, { mimeType: "video/webm" }); const chunks: Blob[] = []; recorder.ondataavailable = event => chunks.push(event.data); recorder.onstop = () => download(new Blob(chunks, { type: "video/webm" }), "subpixel-overlay.webm"); recorder.start(); await new Promise(resolve => setTimeout(resolve, 600)); recorder.stop();
+  return undefined;
 }

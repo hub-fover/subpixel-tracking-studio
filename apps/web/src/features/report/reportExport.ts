@@ -1,10 +1,23 @@
 import type { ReportManifest, ReportModel } from "@subpixel/contracts";
 
+export type ReportExportProgress = {
+  phase: "preflight" | "data" | "pdf" | "xlsx" | "manifest" | "zip" | "complete";
+  completed: number;
+  total: number;
+  message: string;
+};
+
+export type ReportBuildOptions = {
+  signal?: AbortSignal;
+  onProgress?: (progress: ReportExportProgress) => void;
+};
+
 export type ReportAssetResult = {
   kind: string;
   path: string;
   data?: Uint8Array | Blob | string;
   error?: string;
+  skipped?: boolean;
 };
 
 export function sanitizeReportFileName(value: string): string {
@@ -122,9 +135,28 @@ async function sha256(data: Uint8Array): Promise<string> {
   return "";
 }
 
+function reportSourceKind(sourceFile: string): "image-sequence" | "video" | "camera" {
+  if (sourceFile === "camera") return "camera";
+  return /\.(mp4|mov|webm|avi|mkv)$/i.test(sourceFile) ? "video" : "image-sequence";
+}
+
+function cancelledError(): Error & { code: string; recoverable: boolean } {
+  return Object.assign(new Error("报告生成已取消"), { code: "export.cancelled", recoverable: true });
+}
+
+function checkCancelled(signal?: AbortSignal) {
+  if (signal?.aborted) throw cancelledError();
+}
+
+function reportProgress(options: ReportBuildOptions | undefined, progress: ReportExportProgress) {
+  options?.onProgress?.(progress);
+  checkCancelled(options?.signal);
+}
+
 export async function buildReportManifest(report: ReportModel, assets: ReportAssetResult[]): Promise<ReportManifest> {
   const manifestAssets = await Promise.all(assets.map(async asset => {
     if (asset.error) return { kind: asset.kind, path: asset.path, status: "failed" as const, failureReason: asset.error };
+    if (asset.skipped) return { kind: asset.kind, path: asset.path, status: "skipped" as const };
     const data = await bytes(asset.data);
     return { kind: asset.kind, path: asset.path, status: "generated" as const, bytes: data.byteLength, sha256: await sha256(data) };
   }));
@@ -133,7 +165,7 @@ export async function buildReportManifest(report: ReportModel, assets: ReportAss
     reportId: report.metadata.reportId,
     jobId: report.metadata.reportId,
     algorithmVersion: "report-model-v2",
-    source: { kind: "video", name: report.metadata.sourceFile },
+    source: { kind: reportSourceKind(report.metadata.sourceFile), name: report.metadata.sourceFile },
     grade: report.grade,
     thresholds: report.thresholds,
     summary: { points: report.execution.pointCount, frames: report.execution.frameCount, tracks: report.execution.sampleCount, validRatio: report.execution.validRatio, lostRatio: report.execution.lostRatio },
@@ -150,7 +182,8 @@ export function reportJson(report: ReportModel): string {
   return JSON.stringify(report, null, 2);
 }
 
-export async function buildReportXlsx(report: ReportModel): Promise<Blob> {
+export async function buildReportXlsx(report: ReportModel, options?: ReportBuildOptions): Promise<Blob> {
+  checkCancelled(options?.signal);
   const XLSX = await import("xlsx");
   const workbook = XLSX.utils.book_new();
   const add = (name: string, rows: Array<Record<string, unknown>>) => {
@@ -166,15 +199,17 @@ export async function buildReportXlsx(report: ReportModel): Promise<Blob> {
   add("事件", [...report.events.map(event => ({ ...event })), ...report.humanInterventions]);
   add("风险", report.risks.map(risk => ({ ...risk })));
   add("参数", [{ ...report.thresholds, ...report.options }]);
+  checkCancelled(options?.signal);
   const data = XLSX.write(workbook, { type: "array", bookType: "xlsx" });
   return new Blob([data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 }
 
-export async function buildReportPdf(report: ReportModel, annotatedImage?: string): Promise<Blob> {
+export async function buildReportPdf(report: ReportModel, annotatedImage?: string, options?: ReportBuildOptions): Promise<Blob> {
+  checkCancelled(options?.signal);
   const { jsPDF } = await import("jspdf");
   const doc = new jsPDF({ orientation: "portrait", unit: "pt" });
   try {
-    const response = await fetch(`${import.meta.env.BASE_URL ?? "/"}fonts/NotoSansSC-Regular.otf`);
+    const response = await fetch(`${import.meta.env.BASE_URL ?? "/"}fonts/NotoSansSC-Regular.otf`, { signal: options?.signal });
     if (!response.ok) throw new Error(`font request failed: ${response.status}`);
     const buffer = new Uint8Array(await response.arrayBuffer());
     let binary = "";
@@ -183,7 +218,8 @@ export async function buildReportPdf(report: ReportModel, annotatedImage?: strin
     doc.addFileToVFS("NotoSansSC-Regular.otf", base64);
     doc.addFont("NotoSansSC-Regular.otf", "NotoSansSC", "normal");
     doc.setFont("NotoSansSC");
-  } catch {
+  } catch (error) {
+    if ((error as { name?: string }).name === "AbortError") throw cancelledError();
     doc.setFont("helvetica");
   }
   const title = "亚像素特征提取与跟踪报告";
@@ -212,19 +248,34 @@ export async function buildReportPdf(report: ReportModel, annotatedImage?: strin
   return doc.output("blob");
 }
 
-export async function buildReportBundle(report: ReportModel, assets: ReportAssetResult[] = [], annotatedImage?: string): Promise<{ blob: Blob; manifest: ReportManifest }> {
+export async function buildReportBundle(report: ReportModel, assets: ReportAssetResult[] = [], annotatedImage?: string, options?: ReportBuildOptions): Promise<{ blob: Blob; manifest: ReportManifest }> {
+  reportProgress(options, { phase: "preflight", completed: 0, total: 6, message: "检查报告资产" });
   const csvFiles = buildReportCsvFiles(report);
+  checkCancelled(options?.signal);
   const generated: ReportAssetResult[] = [
     { kind: "json", path: "data/report.json", data: reportJson(report) },
     ...Object.entries(csvFiles).map(([name, data]) => ({ kind: "csv", path: `data/${name}`, data })),
     ...assets
   ];
-  try { generated.push({ kind: "pdf", path: "report.pdf", data: await buildReportPdf(report, annotatedImage) }); } catch (error) { generated.push({ kind: "pdf", path: "report.pdf", error: error instanceof Error ? error.message : "PDF 生成失败" }); }
-  try { generated.push({ kind: "xlsx", path: "report.xlsx", data: await buildReportXlsx(report) }); } catch (error) { generated.push({ kind: "xlsx", path: "report.xlsx", error: error instanceof Error ? error.message : "XLSX 生成失败" }); }
-  const allAssets = generated;
+  reportProgress(options, { phase: "data", completed: 1, total: 6, message: "整理 JSON 与 CSV" });
+  try { generated.push({ kind: "pdf", path: "report.pdf", data: await buildReportPdf(report, annotatedImage, options) }); } catch (error) { if ((error as { code?: string }).code === "export.cancelled") throw error; generated.push({ kind: "pdf", path: "report.pdf", error: error instanceof Error ? error.message : "PDF 生成失败" }); }
+  reportProgress(options, { phase: "pdf", completed: 2, total: 6, message: "生成中文 PDF" });
+  checkCancelled(options?.signal);
+  try { generated.push({ kind: "xlsx", path: "report.xlsx", data: await buildReportXlsx(report, options) }); } catch (error) { if ((error as { code?: string }).code === "export.cancelled") throw error; generated.push({ kind: "xlsx", path: "report.xlsx", error: error instanceof Error ? error.message : "XLSX 生成失败" }); }
+  reportProgress(options, { phase: "xlsx", completed: 3, total: 6, message: "生成 XLSX 数据表" });
+  checkCancelled(options?.signal);
+  const selectedAssets = new Set(report.options.includedAssets);
+  const allAssets = selectedAssets.size
+    ? generated.map(asset => selectedAssets.has(asset.path) ? asset : { ...asset, data: undefined, skipped: true })
+    : generated;
   const manifest = await buildReportManifest(report, allAssets);
+  reportProgress(options, { phase: "manifest", completed: 4, total: 6, message: "计算资产哈希" });
   const { zipSync } = await import("fflate");
+  checkCancelled(options?.signal);
   const entries: Record<string, Uint8Array> = { "manifest.json": new TextEncoder().encode(JSON.stringify(manifest, null, 2)) };
-  for (const asset of allAssets) if (!asset.error) entries[asset.path] = await bytes(asset.data);
-  return { blob: new Blob([zipSync(entries, { level: 6 })], { type: "application/zip" }), manifest };
+  for (const asset of allAssets) if (!asset.error && !asset.skipped) entries[asset.path] = await bytes(asset.data);
+  reportProgress(options, { phase: "zip", completed: 5, total: 6, message: "打包 ZIP" });
+  const blob = new Blob([zipSync(entries, { level: 6 })], { type: "application/zip" });
+  reportProgress(options, { phase: "complete", completed: 6, total: 6, message: "报告包生成完成" });
+  return { blob, manifest };
 }

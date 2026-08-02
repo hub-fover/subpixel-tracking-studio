@@ -1,11 +1,11 @@
 import { AlertTriangle, Camera, Check, Download, FileImage, FlipHorizontal2, Pause, Play, Redo2, ScanSearch, Trash2, Undo2, Video, FileText } from "lucide-react";
-import type { AnchorCorrespondence, CameraSession, ExtractionIntent, FeatureDraft, MultiPointTrack, PointSeed, PointTrack, ProcessingStats, RiskNotice, TrackingEvent, Roi, QualityThresholds, ReportMetadata, ReportModel } from "@subpixel/contracts";
+import type { AnchorCorrespondence, CameraSession, ExtractionIntent, FeatureDraft, MultiPointTrack, PointSeed, PointTrack, ProcessingStats, RiskNotice, TrackingEvent, Roi, QualityThresholds, ReportMetadata, ReportModel, ReportOptions } from "@subpixel/contracts";
 import type { CameraFacingMode } from "../capture/cameraSource";
 import { RoiCanvas, type CanvasMode } from "../roi/RoiCanvas";
 import { EventTimeline } from "./EventTimeline";
 import { MetricStrip } from "./MetricStrip";
 import { TrackTable } from "./TrackTable";
-import type { ExportFormat } from "../report/exportClient";
+import type { ExportFormat, ExportOptions, ExportResult } from "../report/exportClient";
 import { RecoveryAnchorsPanel } from "./RecoveryAnchorsPanel";
 import { refinementReasonMessage } from "../roi/refinementMessages";
 import { ReportCenter } from "../report/ReportCenter";
@@ -16,9 +16,9 @@ type Props = {
   onDeleteDraft: () => void; onDeleteSeed: (pointId: string) => void; onReinitialize: (pointId: string) => void; onUndoDelete: () => void;
   canUndoDelete: boolean; mode: CanvasMode; onModeChange: (mode: CanvasMode) => void; seeds: PointSeed[]; multiTracks: MultiPointTrack[];
   tracks: PointTrack[]; events: TrackingEvent[]; running: boolean; onToggle: () => void; onFiles: (files: File[]) => void;
-  onExport: (format: ExportFormat) => void; onReview: (frame: number) => void; recoveryPaused?: boolean; referenceImage?: CanvasImageSource; currentImage?: CanvasImageSource; onApplyRecovery?: (anchors: AnchorCorrespondence[]) => void; onRollbackRecovery?: () => void;
+  onExport: (format: ExportFormat, options?: ExportOptions) => Promise<ExportResult | undefined> | void; onReview: (frame: number) => void; recoveryPaused?: boolean; referenceImage?: CanvasImageSource; currentImage?: CanvasImageSource; onApplyRecovery?: (anchors: AnchorCorrespondence[]) => void; onRollbackRecovery?: () => void;
   onOpenCamera: () => void; cameraActive: boolean; cameraSession: CameraSession; facingMode: CameraFacingMode; onSwitchCamera: () => void; recordingActive: boolean; onToggleRecording: () => void; recordingReady: boolean; onRefineRecording: () => void; riskNotices: RiskNotice[]; processingStats: ProcessingStats;
-  report?: ReportModel; reportOpen: boolean; onOpenReport: () => void; onCloseReport: () => void; onRefreshReport: (metadata: ReportMetadata, thresholds: QualityThresholds) => void;
+  report?: ReportModel; reportOpen: boolean; onOpenReport: () => void; onCloseReport: () => void; onRefreshReport: (metadata: ReportMetadata, thresholds: QualityThresholds, options: ReportOptions) => void;
 };
 
 const intents: [ExtractionIntent, string][] = [

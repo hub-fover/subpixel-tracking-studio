@@ -48,8 +48,8 @@ python -m venv .venv
 
 - “概览”显示合格、需复核、不合格或未评估结论，并给出有效率、失锁率、帧数、延迟和异常区间。
 - “点质量”保留每个 `pointId` 的坐标、位移、置信度、状态和重定位方法；原始逐帧数据不会被图表采样裁剪。
-- “导出设置”可以填写项目名称、试验编号、操作人、备注并调整质量阈值。设置只保存在本机浏览器。
-- “生成 ZIP 报告包”包含中文 PDF、XLSX、JSON、points/tracks/registrations/events/risks 分表 CSV、manifest v2 和带标注图像。单项 PDF/XLSX/JSON 入口仍然可用。
+- “导出设置”可以填写项目名称、试验编号、操作人、备注并调整质量阈值，还能选择完整原图标注/轻量预览和资产清单。设置只保存在本机浏览器。
+- “生成 ZIP 报告包”包含中文 PDF、XLSX、JSON、points/tracks/registrations/events/risks 分表 CSV、manifest v2、参考帧标注图和当前帧轨迹图。生成过程显示阶段进度并支持取消；未选资产会在 manifest 中标记为 `skipped`，失败资产会保留失败原因。单项 PDF/XLSX/JSON 入口仍然可用。
 - 质量等级只代表算法门控结果；没有相机标定、物理尺度和计量溯源时，不作为计量检定结论。
 
 报告使用自托管 Noto Sans SC 字体，字体和 OFL 许可证位于 `apps/web/public/fonts/`。如果字体、Canvas、PDF、XLSX、哈希或 ZIP 生成失败，报告中心会保留已成功资产并显示失败原因，不会静默省略数据。

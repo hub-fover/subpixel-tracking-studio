@@ -4,7 +4,11 @@ const sample = "C:\\Users\\biaoh\\Desktop\\1\\圆\\1.jpg";
 
 async function importSample(page: Page) {
   await page.locator('input[type="file"]').setInputFiles(sample);
-  await expect(page.locator("canvas.roi-canvas")).toBeVisible();
+  // Cold decoding of the native 6144x8192 sample can exceed the default
+  // assertion timeout; wait for the actual native canvas contract instead.
+  await expect(page.locator("canvas.roi-canvas")).toBeVisible({ timeout: 15000 });
+  await expect(page.locator("canvas.roi-canvas")).toHaveAttribute("width", "6144", { timeout: 15000 });
+  await expect(page.locator("canvas.roi-canvas")).toHaveAttribute("height", "8192", { timeout: 15000 });
 }
 
 async function dragRoi(page: Page, from: { x: number; y: number }, to: { x: number; y: number }) {
@@ -39,4 +43,15 @@ test("an unwanted ROI can be deleted before entering the point set", async ({ pa
 test("view zoom changes CSS display only and preserves native ROI coordinates", async ({ page }) => {
   await page.goto("/"); await importSample(page); await dragRoi(page, { x: .2, y: .1 }, { x: .8, y: .9 }); const before = await page.locator(".roi-values dd").allTextContents();
   await page.getByRole("button", { name: "放大图像" }).click(); await page.getByRole("button", { name: "缩小图像" }).click(); const after = await page.locator(".roi-values dd").allTextContents(); expect(after).toEqual(before);
+});
+
+test("report center exposes frozen point data and explicit asset settings", async ({ page }) => {
+  const apiRequests: string[] = [];
+  page.on("request", request => { if (request.url().includes("/api/")) apiRequests.push(request.url()); });
+  await page.goto("/"); await importSample(page); await page.getByLabel("提取类型").selectOption("blob-center");
+  await dragRoi(page, { x: .4, y: .3 }, { x: .6, y: .6 });
+  await expect(page.locator(".draft-ready")).toBeVisible({ timeout: 10000 }); await page.getByRole("button", { name: "确认点" }).click();
+  await page.getByRole("button", { name: "报告" }).click(); await expect(page.getByRole("dialog", { name: "报告中心" })).toBeVisible();
+  await expect(page.getByText("确认点")).toBeVisible(); await page.getByRole("button", { name: "导出设置" }).click();
+  await expect(page.getByText("报告资产")).toBeVisible(); await expect(page.getByLabel("图片包")).toHaveValue("full"); expect(apiRequests).toEqual([]);
 });

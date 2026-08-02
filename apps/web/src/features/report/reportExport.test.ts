@@ -46,6 +46,7 @@ describe("report package builders", () => {
     const manifest = await buildReportManifest(report, assets);
     expect(manifest.schemaVersion).toBe(2);
     expect(manifest.grade).toBe("not-evaluated");
+    expect(manifest.source?.kind).toBe("image-sequence");
     expect(manifest.assets).toEqual(expect.arrayContaining([
       expect.objectContaining({ path: "data/report.json", status: "generated", bytes: 2 }),
       expect.objectContaining({ path: "report.pdf", status: "failed", failureReason: "font unavailable" })
@@ -59,5 +60,27 @@ describe("report package builders", () => {
     expect(Object.keys(files)).toEqual(expect.arrayContaining(["manifest.json", "report.pdf", "report.xlsx", "data/report.json", "data/points.csv", "data/tracks.csv", "data/registrations.csv", "data/events.csv", "data/risks.csv"]));
     expect((manifest.assets ?? []).every(asset => asset.status === "generated")).toBe(true);
     expect(ReportManifestSchema.parse(manifest).schemaVersion).toBe(2);
+  });
+
+  it("reports bundle progress and stops before packaging when cancelled", async () => {
+    const controller = new AbortController();
+    const progress: string[] = [];
+    controller.abort();
+    await expect(buildReportBundle(report, [], undefined, {
+      signal: controller.signal,
+      onProgress: update => progress.push(update.phase)
+    })).rejects.toMatchObject({ code: "export.cancelled" });
+    expect(progress).toContain("preflight");
+  });
+
+  it("records explicitly skipped assets instead of silently dropping them", async () => {
+    const selected = { ...report, options: { ...report.options, includedAssets: ["report.pdf"] } };
+    const { blob, manifest } = await buildReportBundle(selected, []);
+    const pdf = manifest.assets?.find(asset => asset.path === "report.pdf");
+    const json = manifest.assets?.find(asset => asset.path === "data/report.json");
+    expect(pdf?.status).toBe("generated");
+    expect(json?.status).toBe("skipped");
+    const { unzipSync } = await import("fflate");
+    expect(Object.keys(unzipSync(new Uint8Array(await blob.arrayBuffer())))).not.toContain("data/report.json");
   });
 });
