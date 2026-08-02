@@ -7,10 +7,11 @@ import { TrackingWorkbench } from "./features/tracking/TrackingWorkbench";
 import { exportTracking, type ExportFormat } from "./features/report/exportClient";
 import { confirmFeatureDraft, intentToModel, nextPointId } from "./features/roi/pointState";
 import { normalizeNativeRoi, type CanvasMode } from "./features/roi/RoiCanvas";
-import { appendRecoveryEvent, appendRegistration, appendRiskNotice, appendTracks, createPointSetState, flattenTracks, summarizeProcessing, type PointSetState } from "./features/tracking/pointSetState";
+import { appendRecoveryEvent, appendRegistration, appendRiskNotice, appendTracks, clearRiskNotices, createPointSetState, flattenTracks, summarizeProcessing, type PointSetState } from "./features/tracking/pointSetState";
 import { extractNativePatch } from "./features/local/frameUtils";
 import { LocalAlgorithmEngine, type BrowserFrame, type LocalSearchRegion } from "./features/local/localAlgorithmEngine";
 import { LocalWorkerClient } from "./features/local/localWorkerClient";
+import { refinementReasonMessage } from "./features/roi/refinementMessages";
 
 const defaultIntent: ExtractionIntent = "circle-center";
 
@@ -28,6 +29,10 @@ export function trackingTemplateRoi(seed: PointSeed, size: { width: number; heig
   let patchSize = Math.max(9, Math.min(31, Math.floor(Math.min(seed.roi.width, seed.roi.height))));
   if (patchSize % 2 === 0) patchSize -= 1;
   return normalizeNativeRoi({ x: Math.round(seed.snapped.x - (patchSize - 1) / 2), y: Math.round(seed.snapped.y - (patchSize - 1) / 2), width: patchSize, height: patchSize }, size);
+}
+
+export function isCurrentRefinementRevision(responseRevision: number, currentRevision: number) {
+  return responseRevision === currentRevision;
 }
 
 export function App() {
@@ -122,6 +127,7 @@ export function App() {
     const refinementImage = refinementImageRef.current;
     if (!draft || !refinementImage || !sourceSize) return;
     const revision = draft.revision;
+    const token = refinementTokenRef.current;
     const timer = window.setTimeout(() => {
       const frame: BrowserFrame = { frame: frameRef.current, timestampMs: performance.now(), width: sourceSize.width, height: sourceSize.height, source: cameraActive ? "camera" : "image", image: refinementImage };
       void (async () => {
@@ -130,9 +136,12 @@ export function App() {
           const result = engineRef.current.engineStatus.opencv === "ready"
             ? engineRef.current.refine(frame, draft.roi, draft.intent)
             : await (localWorkerRef.current?.refine(frame, patch, draft.roi, draft.intent) ?? Promise.resolve(engineRef.current.refine(frame, draft.roi, draft.intent)));
+          if (!isCurrentRefinementRevision(revision, revisionRef.current) || token !== refinementTokenRef.current) return;
           setDraft(current => current && current.revision === revision ? { ...current, status: result.accepted ? "ready" : "invalid", refinement: result } : current);
-          if (!result.accepted) addRisk({ code: result.reason === "refinement.invalid-roi" ? "refinement.invalid-roi" : "refinement.gate-failed", severity: "warning", frame: frame.frame, message: result.reason ?? "ROI refinement rejected", action: "reselect-roi", recoverable: true });
+          if (!result.accepted) addRisk({ code: result.reason === "refinement.invalid-roi" ? "refinement.invalid-roi" : "refinement.gate-failed", severity: "warning", frame: frame.frame, message: refinementReasonMessage(result.reason), action: "reselect-roi", recoverable: true });
+          else setPointState(state => clearRiskNotices(state, notice => notice.code.startsWith("refinement.")));
         } catch (error) {
+          if (!isCurrentRefinementRevision(revision, revisionRef.current) || token !== refinementTokenRef.current) return;
           setDraft(current => current && current.revision === revision ? { ...current, status: "invalid", refinement: null } : current);
           addRisk({ code: "refinement.gate-failed", severity: "error", frame: frame.frame, message: error instanceof Error ? error.message : "Local refinement failed", action: "retry", recoverable: true });
         }

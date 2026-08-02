@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MultiPointTrack, PointSeed } from "@subpixel/contracts";
-import { appendRiskNotice, appendTracks, createPointSetState, flattenTracks, pointRows, summarizeProcessing } from "./pointSetState";
+import { appendRiskNotice, appendTracks, clearRiskNotices, createPointSetState, flattenTracks, pointRows, summarizeProcessing } from "./pointSetState";
 
 const seed = (id: string): PointSeed => ({
   pointId: id, click: { x: 10, y: 20 }, snapped: { x: 10, y: 20 }, roi: { x: 0, y: 0, width: 20, height: 20 },
@@ -20,6 +20,14 @@ describe("point set state", () => {
     state = appendRiskNotice(state, { ...risk, frame: 5, message: "仍然失锁" });
     expect(state.riskNotices).toHaveLength(1);
     expect(state.riskNotices[0].frame).toBe(5);
+  });
+
+  it("clears resolved refinement risks without removing unrelated risks", () => {
+    let state = createPointSetState();
+    state = appendRiskNotice(state, { id: "refine", code: "refinement.gate-failed", severity: "warning", frame: 0, message: "residual", action: "reselect-roi", recoverable: true });
+    state = appendRiskNotice(state, { id: "camera", code: "camera.orientation-changed", severity: "warning", frame: 0, message: "orientation", action: "reselect-roi", recoverable: true });
+    state = clearRiskNotices(state, notice => notice.code.startsWith("refinement."));
+    expect(state.riskNotices.map(notice => notice.id)).toEqual(["camera"]);
   });
 
   it("summarizes processing statistics for a native frame", () => {

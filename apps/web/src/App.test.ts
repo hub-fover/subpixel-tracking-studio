@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PointSeed } from "@subpixel/contracts";
-import { trackingTemplateRoi } from "./App";
+import { isCurrentRefinementRevision, trackingTemplateRoi } from "./App";
 
 const seed = (model: PointSeed["model"]): PointSeed => ({
   pointId: "p-001",
@@ -13,6 +13,11 @@ const seed = (model: PointSeed["model"]): PointSeed => ({
 });
 
 describe("tracking template ROI", () => {
+  it("discards stale refinement side effects after the ROI revision changes", () => {
+    expect(isCurrentRefinementRevision(4, 5)).toBe(false);
+    expect(isCurrentRefinementRevision(5, 5)).toBe(true);
+  });
+
   it("crops a natural feature around the refined center without scaling pixels", () => {
     const roi = trackingTemplateRoi(seed("natural-keypoint"), { width: 640, height: 480 });
     expect(roi).toEqual({ x: 105, y: 75, width: 31, height: 31 });

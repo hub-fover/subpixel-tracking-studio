@@ -2,6 +2,7 @@ import { featureModels, snapCooperativeCenter, type GrayPatch } from "@subpixel/
 import type { ExtractionIntent, FeatureRefinement, Point, RefinementGeometry, Roi } from "@subpixel/contracts";
 
 type EdgePoint = { x: number; y: number; magnitude: number; angle: number };
+type CenterComponent = { center: Point; boundary: EdgePoint[] };
 type OpenCvRefinement = { Mat: new (...args: any[]) => any; matFromArray?: (...args: any[]) => any; fitEllipse?: (points: any) => any; fitEllipseAMS?: (points: any) => any; cornerSubPix?: (...args: any[]) => any; Size?: new (width: number, height: number) => any; TermCriteria?: new (...args: any[]) => any; CV_32FC2?: number; TERM_CRITERIA_EPS?: number; TERM_CRITERIA_MAX_ITER?: number; [key: string]: any };
 
 function openCv(): OpenCvRefinement | undefined {
@@ -20,6 +21,53 @@ function edges(patch: GrayPatch): EdgePoint[] {
   const sorted = values.map(item => item.magnitude).sort((a, b) => a - b);
   const threshold = sorted[Math.floor(sorted.length * .72)] ?? Infinity;
   return values.filter(item => item.magnitude >= threshold);
+}
+
+function centeredComponent(patch: GrayPatch): CenterComponent | undefined {
+  const centerX = Math.floor(patch.width / 2); const centerY = Math.floor(patch.height / 2);
+  const border: number[] = [];
+  for (let x = 0; x < patch.width; x += 1) border.push(patch.data[x], patch.data[(patch.height - 1) * patch.width + x]);
+  for (let y = 1; y < patch.height - 1; y += 1) border.push(patch.data[y * patch.width], patch.data[y * patch.width + patch.width - 1]);
+  border.sort((a, b) => a - b);
+  const background = border[Math.floor(border.length / 2)] ?? 0;
+  let centerValue = 0; let centerCount = 0;
+  for (let y = Math.max(0, centerY - 1); y <= Math.min(patch.height - 1, centerY + 1); y += 1) for (let x = Math.max(0, centerX - 1); x <= Math.min(patch.width - 1, centerX + 1); x += 1) {
+    centerValue += patch.data[y * patch.width + x]; centerCount += 1;
+  }
+  centerValue /= Math.max(1, centerCount);
+  let minimum = Infinity; let maximum = -Infinity;
+  for (const value of patch.data) { minimum = Math.min(minimum, value); maximum = Math.max(maximum, value); }
+  const range = maximum - minimum;
+  const polarity = Math.sign(centerValue - background);
+  if (!polarity || Math.abs(centerValue - background) < Math.max(1e-6, range * .12)) return undefined;
+  const threshold = (centerValue + background) / 2;
+  const accepted = (value: number) => polarity > 0 ? value >= threshold : value <= threshold;
+  const visited = new Uint8Array(patch.width * patch.height); const component = new Uint8Array(patch.width * patch.height);
+  const seedIndex = centerY * patch.width + centerX; const queue: number[] = [seedIndex]; visited[seedIndex] = 1;
+  let cursor = 0; let count = 0; let xSum = 0; let ySum = 0; let touchesBorder = false;
+  while (cursor < queue.length) {
+    const index = queue[cursor++]; const x = index % patch.width; const y = Math.floor(index / patch.width);
+    if (!accepted(patch.data[index])) continue;
+    component[index] = 1; count += 1; xSum += x; ySum += y;
+    if (x === 0 || y === 0 || x === patch.width - 1 || y === patch.height - 1) touchesBorder = true;
+    for (let oy = -1; oy <= 1; oy += 1) for (let ox = -1; ox <= 1; ox += 1) {
+      const nextX = x + ox; const nextY = y + oy;
+      if (!(ox || oy) || nextX < 0 || nextX >= patch.width || nextY < 0 || nextY >= patch.height) continue;
+      const nextIndex = nextY * patch.width + nextX;
+      if (!visited[nextIndex]) { visited[nextIndex] = 1; queue.push(nextIndex); }
+    }
+  }
+  const fraction = count / Math.max(1, patch.width * patch.height);
+  if (touchesBorder || count < 32 || fraction > .65) return undefined;
+  const boundary: EdgePoint[] = [];
+  for (let y = 1; y < patch.height - 1; y += 1) for (let x = 1; x < patch.width - 1; x += 1) {
+    const index = y * patch.width + x;
+    if (!component[index]) continue;
+    if (component[index - 1] && component[index + 1] && component[index - patch.width] && component[index + patch.width]) continue;
+    const gx = patch.data[index + 1] - patch.data[index - 1]; const gy = patch.data[index + patch.width] - patch.data[index - patch.width];
+    boundary.push({ x, y, magnitude: Math.hypot(gx, gy), angle: (Math.atan2(gy, gx) * 180 / Math.PI + 180) % 180 });
+  }
+  return boundary.length >= 32 ? { center: { x: xSum / count, y: ySum / count }, boundary } : undefined;
 }
 
 function globalPoint(roi: Roi, point: Point): Point { return { x: roi.x + point.x, y: roi.y + point.y }; }
@@ -81,7 +129,9 @@ function emptyResult(intent: ExtractionIntent, roi: Roi, reason: string): Featur
 }
 
 function circleRefinement(patch: GrayPatch, intent: ExtractionIntent, roi: Roi): FeatureRefinement {
-  const edgePoints = edges(patch);
+  // A centered connected component isolates a selected disc from nearby targets and background texture.
+  const component = centeredComponent(patch);
+  const edgePoints = component?.boundary ?? edges(patch);
   if (edgePoints.length < 32) return emptyResult(intent, roi, "refinement.edge-points");
   const cv = openCv();
   if (cv?.fitEllipse || cv?.fitEllipseAMS) {
@@ -104,8 +154,8 @@ function circleRefinement(patch: GrayPatch, intent: ExtractionIntent, roi: Roi):
       // Keep the deterministic TypeScript path when OpenCV.js is unavailable or its API differs.
     }
   }
-  const snapped = snapCooperativeCenter(patch, "circle");
-  const center = { x: snapped.x, y: snapped.y };
+  const snapped = component ? undefined : snapCooperativeCenter(patch, "circle");
+  const center = component?.center ?? { x: snapped!.x, y: snapped!.y };
   const ellipse = estimateEllipseFromEdges(edgePoints, center);
   const residual = ellipseEdgeResidual(edgePoints, center, ellipse.major, ellipse.minor, ellipse.angleDeg);
   const bins = new Set(edgePoints.map(edge => Math.floor(Math.atan2(edge.y - center.y, edge.x - center.x) * 18 / Math.PI + 18) % 36));
@@ -113,7 +163,7 @@ function circleRefinement(patch: GrayPatch, intent: ExtractionIntent, roi: Roi):
   const touchesBoundary = edgePoints.some(edge => edge.x <= 1 || edge.y <= 1 || edge.x >= patch.width - 2 || edge.y >= patch.height - 2);
   const axisRatio = ellipse.minor / Math.max(ellipse.major, 1e-9);
   const gates = { edgeCoverage: edgeCoverage >= .6, edgePoints: edgePoints.length >= 32, axisRatio: axisRatio >= .15, residual: residual <= Math.max(.75, .02 * ellipse.minor), roiBoundary: !touchesBoundary };
-  const accepted = Object.values(gates).every(Boolean) && snapped.confidence >= .2;
+  const accepted = Object.values(gates).every(Boolean) && (component ? true : snapped!.confidence >= .2);
   const point = globalPoint(roi, center);
   const geometry: RefinementGeometry = { kind: "ellipse", center: point, majorAxis: ellipse.major, minorAxis: ellipse.minor, angleDeg: ellipse.angleDeg, edgeCoverage, inlierCount: edgePoints.length };
   return { accepted, intent, roi, point: accepted ? point : null, confidence: Math.max(0, Math.min(1, edgeCoverage * Math.exp(-residual))), residualPx: residual, gates, reason: accepted ? null : Object.entries(gates).find(([, value]) => !value)?.[0] ?? "refinement.low-confidence", geometry };

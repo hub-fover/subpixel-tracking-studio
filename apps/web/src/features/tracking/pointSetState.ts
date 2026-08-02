@@ -52,6 +52,10 @@ export function appendRiskNotice(state: PointSetState, notice: RiskNotice): Poin
   return { ...state, riskNotices: [...state.riskNotices.filter(item => item.id !== notice.id), { ...notice, createdAt: notice.createdAt ?? Date.now() }].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0)) };
 }
 
+export function clearRiskNotices(state: PointSetState, predicate: (notice: RiskNotice) => boolean): PointSetState {
+  return { ...state, riskNotices: state.riskNotices.filter(notice => !predicate(notice)) };
+}
+
 export function summarizeProcessing(input: { processedFrames: number; droppedFrames: number; latencies: number[]; nativeWidth: number | null; nativeHeight: number | null; engine: ProcessingStats["engine"] }): ProcessingStats {
   const values = [...input.latencies].sort((a, b) => a - b);
   const p95 = values.length ? values[Math.min(values.length - 1, Math.ceil(values.length * .95) - 1)] : 0;
