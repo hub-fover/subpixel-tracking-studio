@@ -15,5 +15,5 @@ export async function loadFirstFileFrame(file: File): Promise<CapturedFrame> {
 
 export function imageSequenceSource(files: File[]): FrameSource {
   let stopped = false;
-  return { stop: () => { stopped = true; }, async *[Symbol.asyncIterator]() { for (const file of files) { if (stopped) return; yield loadFirstFileFrame(file); } } };
+  return { stop: () => { stopped = true; }, async *[Symbol.asyncIterator]() { for (const file of files) { if (stopped) return; yield await loadFirstFileFrame(file); } } };
 }

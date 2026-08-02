@@ -213,6 +213,69 @@ export const TrackingEventSchema = z.object({
   recoverable: z.boolean()
 });
 
+export const RiskNoticeSchema = z.object({
+  id: z.string().min(1),
+  code: z.enum([
+    "secure-context.required",
+    "browser.unsupported",
+    "camera.unsupported",
+    "camera.permission-denied",
+    "camera.unavailable",
+    "camera.no-device",
+    "camera.orientation-changed",
+    "opencv.load-failed",
+    "opencv.feature-unavailable",
+    "refinement.invalid-roi",
+    "refinement.low-confidence",
+    "refinement.gate-failed",
+    "registration.rejected",
+    "tracking.identity-gate-failed",
+    "tracking.lost",
+    "tracking.frame-budget",
+    "device.low-battery",
+    "device.overheat",
+    "recording.unsupported",
+    "storage.low",
+    "export.failed"
+  ]),
+  severity: z.enum(["info", "warning", "error"]),
+  frame: z.number().int().nonnegative(),
+  pointId: z.string().min(1).optional(),
+  message: z.string().min(1),
+  action: z.enum([
+    "none",
+    "open-settings",
+    "retry",
+    "reselect-roi",
+    "continue-local",
+    "select-anchors",
+    "pause",
+    "resume",
+    "export-current"
+  ]),
+  recoverable: z.boolean(),
+  createdAt: z.number().nonnegative().optional()
+});
+
+export const CameraSessionSchema = z.object({
+  status: z.enum(["idle", "requesting", "ready", "denied", "unsupported", "stopped", "error"]),
+  facingMode: z.enum(["environment", "user"]).nullable(),
+  nativeWidth: z.number().int().positive().nullable(),
+  nativeHeight: z.number().int().positive().nullable(),
+  recording: z.boolean(),
+  error: z.string().nullable()
+});
+
+export const ProcessingStatsSchema = z.object({
+  processedFrames: z.number().int().nonnegative(),
+  droppedFrames: z.number().int().nonnegative(),
+  fps: z.number().nonnegative(),
+  p95LatencyMs: z.number().nonnegative(),
+  engine: z.enum(["typescript", "opencv-js", "degraded"]),
+  nativeWidth: z.number().int().positive().nullable(),
+  nativeHeight: z.number().int().positive().nullable()
+});
+
 export const ReportManifestSchema = z.object({
   jobId: z.string().min(1),
   algorithmVersion: z.string().min(1),
@@ -243,3 +306,20 @@ export type MultiPointTrack = z.infer<typeof MultiPointTrackSchema>;
 export type FrameRegistration = z.infer<typeof FrameRegistrationSchema>;
 export type AnchorCorrespondence = z.infer<typeof AnchorCorrespondenceSchema>;
 export type RecoveryEvent = z.infer<typeof RecoveryEventSchema>;
+export type RiskNotice = z.infer<typeof RiskNoticeSchema>;
+export type CameraSession = z.infer<typeof CameraSessionSchema>;
+export type ProcessingStats = z.infer<typeof ProcessingStatsSchema>;
+
+export type LocalFrame = {
+  frame: number;
+  timestampMs: number;
+  width: number;
+  height: number;
+  source: "camera" | "image" | "video";
+};
+
+export type EngineStatus = {
+  opencv: "ready" | "unavailable";
+  version?: string;
+  capabilities: { refinement: boolean; registration: boolean; descriptors: boolean };
+};

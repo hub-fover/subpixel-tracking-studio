@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MultiPointTrack, PointSeed } from "@subpixel/contracts";
-import { appendTracks, createPointSetState, flattenTracks, pointRows } from "./pointSetState";
+import { appendRiskNotice, appendTracks, createPointSetState, flattenTracks, pointRows, summarizeProcessing } from "./pointSetState";
 
 const seed = (id: string): PointSeed => ({
   pointId: id, click: { x: 10, y: 20 }, snapped: { x: 10, y: 20 }, roi: { x: 0, y: 0, width: 20, height: 20 },
@@ -13,6 +13,22 @@ const track = (pointId: string, frame: number): MultiPointTrack => ({
 });
 
 describe("point set state", () => {
+  it("keeps actionable risks newest-first without duplicating an id", () => {
+    let state = createPointSetState();
+    const risk = { id: "risk-1", code: "tracking.lost" as const, severity: "error" as const, frame: 4, message: "失锁", action: "select-anchors" as const, recoverable: true };
+    state = appendRiskNotice(state, risk);
+    state = appendRiskNotice(state, { ...risk, frame: 5, message: "仍然失锁" });
+    expect(state.riskNotices).toHaveLength(1);
+    expect(state.riskNotices[0].frame).toBe(5);
+  });
+
+  it("summarizes processing statistics for a native frame", () => {
+    const stats = summarizeProcessing({ processedFrames: 12, droppedFrames: 3, latencies: [10, 20, 40, 30], nativeWidth: 1920, nativeHeight: 1080, engine: "typescript" });
+    expect(stats.fps).toBeGreaterThan(0);
+    expect(stats.p95LatencyMs).toBe(40);
+    expect(stats.nativeWidth).toBe(1920);
+  });
+
   it("keeps every confirmed point visible before tracking", () => {
     const state = createPointSetState([seed("p-001"), seed("p-002"), seed("p-003")]);
     expect(pointRows(state)).toHaveLength(3);

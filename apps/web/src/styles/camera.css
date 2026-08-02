@@ -1,0 +1,18 @@
+.camera-video-source { position: fixed; width: 2px; height: 2px; opacity: 0; pointer-events: none; z-index: -1; }
+.source-actions { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 6px; }
+.source-actions .source-button { margin: 0; min-width: 0; font-size: 12px; }
+.source-actions .icon-button { align-self: stretch; }
+.camera-status { margin: 8px 0 0; color: var(--muted); font-size: 11px; text-transform: lowercase; }
+.risk-panel { background: #fffaf0; }
+.risk-panel .panel-title { color: #8a5100; }
+.risk-item { display: grid; gap: 3px; margin: 6px 0; padding: 7px 8px; border-left: 3px solid #dca53e; background: #fff3d8; font-size: 11px; }
+.risk-item strong { font-weight: 600; color: #614000; }
+.risk-item small { color: #886d3c; font: 10px ui-monospace, monospace; }
+.risk-error { border-left-color: #d95b4f; background: #fff0ee; }
+.risk-error strong { color: #8b2e26; }
+.stats-panel p { margin: 4px 0; color: var(--muted); font: 11px ui-monospace, monospace; }
+@media (max-width: 720px) {
+  .source-actions { grid-template-columns: 1fr 1fr 34px; }
+  .canvas-toolbar { max-width: calc(100% - 20px); overflow: auto; justify-content: center; }
+  .canvas-toolbar .source-button { white-space: nowrap; }
+}

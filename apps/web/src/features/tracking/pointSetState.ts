@@ -1,4 +1,4 @@
-import type { FrameRegistration, MultiPointTrack, PointSeed, RecoveryEvent } from "@subpixel/contracts";
+import type { CameraSession, FrameRegistration, MultiPointTrack, PointSeed, ProcessingStats, RecoveryEvent, RiskNotice } from "@subpixel/contracts";
 
 export type PointSetState = {
   seeds: PointSeed[];
@@ -6,10 +6,21 @@ export type PointSetState = {
   registrations: FrameRegistration[];
   recoveryEvents: RecoveryEvent[];
   activePointIds: string[];
+  riskNotices: RiskNotice[];
+  cameraSession: CameraSession;
+  processingStats: ProcessingStats;
+  referenceFrame?: { width: number; height: number; timestampMs: number };
+  recording: { active: boolean; mimeType: string | null; blob: Blob | null };
 };
 
 export function createPointSetState(seeds: PointSeed[] = []): PointSetState {
-  return { seeds: [...seeds], tracksByPoint: new Map(), registrations: [], recoveryEvents: [], activePointIds: seeds.map(seed => seed.pointId) };
+  return {
+    seeds: [...seeds], tracksByPoint: new Map(), registrations: [], recoveryEvents: [], activePointIds: seeds.map(seed => seed.pointId),
+    riskNotices: [],
+    cameraSession: { status: "idle", facingMode: "environment", nativeWidth: null, nativeHeight: null, recording: false, error: null },
+    processingStats: { processedFrames: 0, droppedFrames: 0, fps: 0, p95LatencyMs: 0, engine: "typescript", nativeWidth: null, nativeHeight: null },
+    recording: { active: false, mimeType: null, blob: null }
+  };
 }
 
 export function pointRows(state: PointSetState): PointSeed[] {
@@ -35,4 +46,23 @@ export function appendRegistration(state: PointSetState, registration: FrameRegi
 
 export function appendRecoveryEvent(state: PointSetState, event: RecoveryEvent): PointSetState {
   return { ...state, recoveryEvents: [...state.recoveryEvents.filter(item => item.id !== event.id), event] };
+}
+
+export function appendRiskNotice(state: PointSetState, notice: RiskNotice): PointSetState {
+  return { ...state, riskNotices: [...state.riskNotices.filter(item => item.id !== notice.id), { ...notice, createdAt: notice.createdAt ?? Date.now() }].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0)) };
+}
+
+export function summarizeProcessing(input: { processedFrames: number; droppedFrames: number; latencies: number[]; nativeWidth: number | null; nativeHeight: number | null; engine: ProcessingStats["engine"] }): ProcessingStats {
+  const values = [...input.latencies].sort((a, b) => a - b);
+  const p95 = values.length ? values[Math.min(values.length - 1, Math.ceil(values.length * .95) - 1)] : 0;
+  const elapsedSeconds = values.reduce((sum, value) => sum + value, 0) / 1000;
+  return {
+    processedFrames: input.processedFrames,
+    droppedFrames: input.droppedFrames,
+    fps: elapsedSeconds > 0 ? input.processedFrames / elapsedSeconds : 0,
+    p95LatencyMs: p95,
+    engine: input.engine,
+    nativeWidth: input.nativeWidth,
+    nativeHeight: input.nativeHeight
+  };
 }

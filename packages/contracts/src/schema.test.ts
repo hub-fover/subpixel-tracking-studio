@@ -10,6 +10,9 @@ import {
   PointSeedSchema,
   PointTrackSchema,
   RecoveryEventSchema,
+  RiskNoticeSchema,
+  CameraSessionSchema,
+  ProcessingStatsSchema,
   TrackingJobSchema
 } from "./schema";
 
@@ -114,6 +117,36 @@ describe("tracking contracts", () => {
       template: { width: 16, height: 16, levels: 3, descriptor: [0.1, 0.2] }
     });
     expect(result.success).toBe(true);
+  });
+
+  it("describes actionable local-processing risks and native camera stats", () => {
+    const notice = RiskNoticeSchema.parse({
+      id: "risk-1",
+      code: "camera.permission-denied",
+      severity: "error",
+      frame: 0,
+      message: "相机权限被拒绝",
+      action: "open-settings",
+      recoverable: true
+    });
+    expect(notice.action).toBe("open-settings");
+    expect(CameraSessionSchema.parse({
+      status: "ready",
+      facingMode: "environment",
+      nativeWidth: 3840,
+      nativeHeight: 2160,
+      recording: false,
+      error: null
+    }).nativeWidth).toBe(3840);
+    expect(ProcessingStatsSchema.parse({
+      processedFrames: 12,
+      droppedFrames: 3,
+      fps: 15,
+      p95LatencyMs: 44,
+      engine: "opencv-js",
+      nativeWidth: 3840,
+      nativeHeight: 2160
+    }).engine).toBe("opencv-js");
   });
 
   it("accepts multi-point tracking, registration, anchors, and recovery events", () => {

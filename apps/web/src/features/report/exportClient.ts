@@ -1,4 +1,4 @@
-import type { FrameRegistration, MultiPointTrack, PointSeed, PointTrack, RecoveryEvent, Roi, TrackingEvent } from "@subpixel/contracts";
+import type { FrameRegistration, MultiPointTrack, PointSeed, PointTrack, ProcessingStats, RecoveryEvent, RiskNotice, Roi, TrackingEvent } from "@subpixel/contracts";
 
 export type ExportFormat = "json" | "csv" | "xlsx" | "pdf" | "images" | "video";
 export type ExportPayload = {
@@ -8,6 +8,8 @@ export type ExportPayload = {
   points?: PointSeed[];
   registrations?: FrameRegistration[];
   recoveryEvents?: RecoveryEvent[];
+  riskNotices?: RiskNotice[];
+  processingStats?: ProcessingStats;
   events: TrackingEvent[];
   roi: Roi;
   model: string;
@@ -20,6 +22,8 @@ export type ExportDocument = {
   registrations: Array<Record<string, unknown>>;
   recoveryEvents: Array<Record<string, unknown>>;
   events: Array<Record<string, unknown>>;
+  riskNotices: Array<Record<string, unknown>>;
+  processingStats?: Record<string, unknown>;
 };
 
 export function overlayCanvasSize(source: { width?: number; height?: number; videoWidth?: number; videoHeight?: number }) {
@@ -33,7 +37,7 @@ export function buildExportRows(payload: ExportPayload) {
   return [...payload.tracks].sort((a, b) => a.frame - b.frame).map(track => ({ point_id: "p-001", frame: track.frame, timestamp_ms: track.timestampMs, x_px: track.x, y_px: track.y, model: track.model, residual: track.residual, confidence: track.confidence, state: track.state, duration_ms: track.durationMs }));
 }
 
-export function buildExportDocument(payload: Pick<ExportPayload, "points" | "seeds" | "tracks" | "multiTracks" | "registrations" | "recoveryEvents" | "events">): ExportDocument {
+export function buildExportDocument(payload: Pick<ExportPayload, "points" | "seeds" | "tracks" | "multiTracks" | "registrations" | "recoveryEvents" | "events" | "riskNotices" | "processingStats">): ExportDocument {
   const points = (payload.points ?? payload.seeds ?? []).slice().sort((a, b) => a.pointId.localeCompare(b.pointId)).map(seed => ({
     point_id: seed.pointId, model: seed.model, intent: seed.intent ?? null, group_id: seed.groupId, selection_method: seed.selectionMethod ?? null,
     click_x_px: seed.click.x, click_y_px: seed.click.y, x_px: seed.snapped.x, y_px: seed.snapped.y,
@@ -47,6 +51,8 @@ export function buildExportDocument(payload: Pick<ExportPayload, "points" | "see
     registrations: (payload.registrations ?? []).map(row => ({ record_type: "registration", ...row })),
     recoveryEvents: (payload.recoveryEvents ?? []).map(row => ({ record_type: "recovery", ...row })),
     events: (payload.events ?? []).map(row => ({ record_type: "event", ...row })),
+    riskNotices: (payload.riskNotices ?? []).map(row => ({ record_type: "risk", ...row })),
+    processingStats: payload.processingStats ? { record_type: "processing", ...payload.processingStats } : undefined
   };
 }
 
@@ -69,11 +75,11 @@ export async function exportTracking(format: ExportFormat, payload: ExportPayloa
   const document = buildExportDocument(payload); const data = buildExportRows(payload);
   if (format === "json") return download(new Blob([JSON.stringify({ generatedAt: new Date().toISOString(), ...document }, null, 2)], { type: "application/json" }), "subpixel-results.json");
   if (format === "csv") {
-    const records = [...document.points.map(row => ({ record_type: "point", ...row })), ...document.tracks, ...document.registrations, ...document.recoveryEvents, ...document.events];
+    const records = [...document.points.map(row => ({ record_type: "point", ...row })), ...document.tracks, ...document.registrations, ...document.recoveryEvents, ...document.events, ...document.riskNotices, ...(document.processingStats ? [document.processingStats] : [])];
     const columns = [...new Set(records.flatMap(row => Object.keys(row)))]; const csv = [columns.join(","), ...records.map(row => { const record = row as Record<string, unknown>; return columns.map(column => JSON.stringify(record[column] ?? "")).join(","); })].join("\n");
     return download(new Blob([csv], { type: "text/csv;charset=utf-8" }), "subpixel-results.csv");
   }
-  if (format === "xlsx") { const XLSX = await import("xlsx"); const workbook = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(document.points), "points"); XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(document.tracks), "tracks"); XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(document.registrations), "registrations"); XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet([...document.recoveryEvents, ...document.events]), "events"); XLSX.writeFile(workbook, "subpixel-results.xlsx"); return; }
+  if (format === "xlsx") { const XLSX = await import("xlsx"); const workbook = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(document.points), "points"); XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(document.tracks), "tracks"); XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(document.registrations), "registrations"); XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet([...document.recoveryEvents, ...document.events, ...document.riskNotices, ...(document.processingStats ? [document.processingStats] : [])]), "events"); XLSX.writeFile(workbook, "subpixel-results.xlsx"); return; }
   if (format === "pdf") { const { jsPDF } = await import("jspdf"); const doc = new jsPDF({ orientation: "landscape" }); doc.setFontSize(18); doc.text("Subpixel Multi-point Tracking Report", 14, 16); doc.setFontSize(10); doc.text(`Points: ${document.points.length}  Samples: ${data.length}`, 14, 25); doc.addImage(markedCanvas(payload).toDataURL("image/jpeg", .85), "JPEG", 14, 32, 170, 106); doc.save("subpixel-report.pdf"); return; }
   const canvas = markedCanvas(payload); if (format === "images") return canvas.toBlob(blob => blob && download(blob, "subpixel-overlay.png"), "image/png");
   const stream = canvas.captureStream(10); const recorder = new MediaRecorder(stream, { mimeType: "video/webm" }); const chunks: Blob[] = []; recorder.ondataavailable = event => chunks.push(event.data); recorder.onstop = () => download(new Blob(chunks, { type: "video/webm" }), "subpixel-overlay.webm"); recorder.start(); await new Promise(resolve => setTimeout(resolve, 600)); recorder.stop();

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildExportRows, buildExportDocument, overlayCanvasSize } from "./exportClient";
-import type { FrameRegistration, PointSeed } from "@subpixel/contracts";
+import type { FrameRegistration, PointSeed, RiskNotice } from "@subpixel/contracts";
 
 describe("report export contract", () => { it("sorts exports by frame", () => { const frames = [{ frame: 3 }, { frame: 1 }].sort((a, b) => a.frame - b.frame); expect(frames.map(item => item.frame)).toEqual([1, 3]); }); });
 
@@ -28,4 +28,10 @@ it("keeps registration rows alongside every point track", () => {
   const document = buildExportDocument({ points: [], tracks: [], registrations: [registration], recoveryEvents: [], events: [] });
   expect(document.registrations).toHaveLength(1);
   expect(document.registrations[0]).toMatchObject({ frame: 5, method: "sift-ransac" });
+});
+
+it("exports local risk notices with the report", () => {
+  const risk: RiskNotice = { id: "risk-1", code: "tracking.lost", severity: "error", frame: 4, message: "lost", action: "select-anchors", recoverable: true };
+  const document = buildExportDocument({ points: [], tracks: [], registrations: [], recoveryEvents: [], events: [], riskNotices: [risk] });
+  expect(document.riskNotices[0]).toMatchObject({ record_type: "risk", code: "tracking.lost" });
 });

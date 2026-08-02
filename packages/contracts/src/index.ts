@@ -11,6 +11,9 @@ export {
   RefinementGeometrySchema,
   PointTrackSchema,
   RecoveryEventSchema,
+  RiskNoticeSchema,
+  CameraSessionSchema,
+  ProcessingStatsSchema,
   ReportManifestSchema,
   RoiSchema,
   TrackingEventSchema,
@@ -34,5 +37,10 @@ export type {
   Roi,
   TrackingEvent,
   TrackingJob,
-  RecoveryEvent
+  RecoveryEvent,
+  RiskNotice,
+  CameraSession,
+  ProcessingStats,
+  LocalFrame,
+  EngineStatus
 } from "./schema";
