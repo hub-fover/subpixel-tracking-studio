@@ -10,12 +10,23 @@ export type MultiPointObservation = {
   residual: number;
   metrics?: { forwardBackwardError?: number; ncc?: number; epipolarError?: number; loweRatio?: number; descriptorDistance?: number };
   relocationMethod?: MultiPointTrack["relocationMethod"];
+  predictionSource?: MultiPointTrack["predictionSource"];
+  localAffineResidualPx?: number | null;
+  gateFailures?: string[];
+  candidateUniqueness?: number | null;
 };
 
 export type MultiPointFrameResult = {
   tracks: MultiPointTrack[];
   paused: boolean;
   lostRatio: number;
+  invalidRatio: number;
+};
+
+export type MultiPointTrackerSnapshot = {
+  frame: number;
+  paused: boolean;
+  positions: Array<readonly [string, { x: number; y: number }]>;
 };
 
 export function createMultiPointTracker(seeds: PointSeed[], options: { pauseLostRatio?: number } = {}) {
@@ -26,14 +37,9 @@ export function createMultiPointTracker(seeds: PointSeed[], options: { pauseLost
 
   function process(observations: MultiPointObservation[], timestampMs = 0, registration?: { matchCount: number; inlierRatio: number; medianReprojectionError: number; accepted?: boolean }): MultiPointFrameResult {
     const byPoint = new Map(observations.map(observation => [observation.pointId, observation]));
-    const anchors: Anchor[] = observations
-      .filter(observation => observation.refined && observation.confidence >= 0.55 && previous.has(observation.pointId))
-      .map(observation => ({ reference: previous.get(observation.pointId)!, current: observation.refined!, reliable: true }));
-    const propagated = anchors.length >= 3 ? new Map(seeds.map(seed => [seed.pointId, applyLocalAffine(previous.get(seed.pointId) ?? seed.snapped, anchors)])) : new Map();
     const tracks: MultiPointTrack[] = seeds.map(seed => {
       const observation = byPoint.get(seed.pointId);
-      const localPrediction = propagated.get(seed.pointId);
-      const predicted = localPrediction?.accepted ? localPrediction.point : observation?.predicted ?? previous.get(seed.pointId) ?? seed.snapped;
+      const predicted = observation?.predicted ?? previous.get(seed.pointId) ?? seed.snapped;
       const refined = observation?.refined ?? predicted;
       let state: MultiPointTrack["state"] = "lost";
       if (observation) {
@@ -44,22 +50,36 @@ export function createMultiPointTracker(seeds: PointSeed[], options: { pauseLost
           epipolarError: metrics.epipolarError,
           loweRatio: metrics.loweRatio
         }).accepted);
-        state = naturalGate && observation.confidence >= 0.35 ? "valid" : "suspect";
+        state = naturalGate && observation.confidence >= 0.35 && !(observation.gateFailures?.length) ? "valid" : "suspect";
       }
       if (state === "valid") previous.set(seed.pointId, refined);
-      return { pointId: seed.pointId, frame, timestampMs, predicted, refined, model: seed.model, confidence: observation?.confidence ?? 0, residual: observation?.residual ?? Infinity, flowErrorForwardBackward: observation?.metrics?.forwardBackwardError ?? null, ncc: observation?.metrics?.ncc ?? null, descriptorDistance: observation?.metrics?.descriptorDistance ?? null, epipolarError: observation?.metrics?.epipolarError ?? null, state, relocationMethod: observation?.relocationMethod ?? "none" } satisfies MultiPointTrack;
+      return { pointId: seed.pointId, frame, timestampMs, predicted, refined, model: seed.model, confidence: observation?.confidence ?? 0, residual: observation?.residual ?? Infinity, flowErrorForwardBackward: observation?.metrics?.forwardBackwardError ?? null, ncc: observation?.metrics?.ncc ?? null, descriptorDistance: observation?.metrics?.descriptorDistance ?? null, epipolarError: observation?.metrics?.epipolarError ?? null, predictionSource: observation?.predictionSource ?? "previous-position", innovationPx: Math.hypot(refined.x - predicted.x, refined.y - predicted.y), localAffineResidualPx: observation?.localAffineResidualPx ?? null, gateFailures: observation?.gateFailures ?? [], candidateUniqueness: observation?.candidateUniqueness ?? null, state, relocationMethod: observation?.relocationMethod ?? "none" } satisfies MultiPointTrack;
     });
     const lost = tracks.filter(track => track.state === "lost").length;
-    const registrationPause = registration && registration.accepted === false ? shouldPauseMultiPoint({ total: seeds.length, lost, matchCount: registration.matchCount, inlierRatio: registration.inlierRatio, medianReprojectionError: registration.medianReprojectionError }) : false;
-    paused = paused || lost / Math.max(seeds.length, 1) >= pauseLostRatio || registrationPause;
+    const invalid = tracks.filter(track => track.state === "lost" || track.state === "suspect").length;
+    const registrationPause = registration?.accepted === false || Boolean(registration && shouldPauseMultiPoint({ total: seeds.length, lost, matchCount: registration.matchCount, inlierRatio: registration.inlierRatio, medianReprojectionError: registration.medianReprojectionError }));
+    paused = paused || invalid / Math.max(seeds.length, 1) >= pauseLostRatio || registrationPause;
     if (paused) for (const track of tracks) if (track.state === "valid") track.state = "paused";
     frame += 1;
-    return { tracks, paused, lostRatio: lost / Math.max(seeds.length, 1) };
+    return { tracks, paused, lostRatio: lost / Math.max(seeds.length, 1), invalidRatio: invalid / Math.max(seeds.length, 1) };
   }
 
   return {
     initialize() { frame = 0; paused = false; previous = new Map(seeds.map(seed => [seed.pointId, seed.snapped])); },
     process,
+    snapshot(): MultiPointTrackerSnapshot {
+      return {
+        frame,
+        paused,
+        positions: [...previous.entries()].map(([pointId, point]) => [pointId, { ...point }] as const)
+      };
+    },
+    restore(snapshot: MultiPointTrackerSnapshot) {
+      const validIds = new Set(seeds.map(seed => seed.pointId));
+      frame = snapshot.frame;
+      paused = snapshot.paused;
+      previous = new Map(snapshot.positions.filter(([pointId]) => validIds.has(pointId)).map(([pointId, point]) => [pointId, { ...point }]));
+    },
     applyAnchors(anchors: Anchor[]) {
       const reliable = anchors.filter(anchor => anchor.reliable !== false);
       const used = new Set<number>();

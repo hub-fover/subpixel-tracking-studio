@@ -8,6 +8,7 @@
 .risk-item { display: grid; gap: 3px; margin: 6px 0; padding: 7px 8px; border-left: 3px solid #dca53e; background: #fff3d8; font-size: 11px; }
 .risk-item strong { font-weight: 600; color: #614000; }
 .risk-item small { color: #886d3c; font: 10px ui-monospace, monospace; }
+.degraded-confirm { width: 100%; margin-top: 8px; justify-content: center; border-color: #b87500; color: #7a4a00; background: #fff7e6; }
 .risk-error { border-left-color: #d95b4f; background: #fff0ee; }
 .risk-error strong { color: #8b2e26; }
 .stats-panel p { margin: 4px 0; color: var(--muted); font: 11px ui-monospace, monospace; }

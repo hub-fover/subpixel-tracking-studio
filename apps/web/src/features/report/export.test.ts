@@ -1,16 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { buildExportRows, buildExportDocument, overlayCanvasSize } from "./exportClient";
+import { buildExportRows, buildExportDocument, overlayCanvasSize, reportPreviewCanvasSize } from "./exportClient";
 import type { FrameRegistration, PointSeed, RiskNotice } from "@subpixel/contracts";
 
 describe("report export contract", () => { it("sorts exports by frame", () => { const frames = [{ frame: 3 }, { frame: 1 }].sort((a, b) => a.frame - b.frame); expect(frames.map(item => item.frame)).toEqual([1, 3]); }); });
 
 it("exports multi-point quality metrics by point id with model-specific residual semantics", () => {
-  const rows = buildExportRows({ tracks: [], events: [], roi: { x: 0, y: 0, width: 10, height: 10 }, model: "mixed", multiTracks: [{ pointId: "p-1", frame: 2, timestampMs: 33, predicted: { x: 1, y: 2 }, refined: { x: 1.1, y: 2.1 }, model: "natural-keypoint", confidence: .9, residual: .1, loweRatio: .72, flowErrorForwardBackward: .4, ncc: .8, descriptorDistance: .5, epipolarError: 1, state: "valid", relocationMethod: "klt" }] });
+  const rows = buildExportRows({ tracks: [], events: [], roi: { x: 0, y: 0, width: 10, height: 10 }, model: "mixed", multiTracks: [{ pointId: "p-1", frame: 2, timestampMs: 33, predicted: { x: 1, y: 2 }, refined: { x: 1.1, y: 2.1 }, model: "natural-keypoint", confidence: .9, residual: .1, loweRatio: .72, flowErrorForwardBackward: .4, ncc: .8, descriptorDistance: .5, epipolarError: 1, predictionSource: "reference-homography", innovationPx: .14, localAffineResidualPx: null, gateFailures: [], candidateUniqueness: 1.4, state: "valid", relocationMethod: "klt" }] });
   expect(rows[0]).toMatchObject({ point_id: "p-1", x_px: 1.1, relocation_method: "klt", ncc: .8, lowe_ratio: .72, residual: .1, residual_semantics: "matching-error-model-specific" });
 });
 
 it("keeps overlay exports at native image dimensions", () => {
   expect(overlayCanvasSize({ width: 6144, height: 8192 })).toEqual({ width: 6144, height: 8192 });
+  expect(reportPreviewCanvasSize({ width: 6144, height: 8192 }, 2048)).toEqual({ width: 1536, height: 2048, scale: .25 });
 });
 
 it("exports all confirmed points even when no frames have been tracked", () => {

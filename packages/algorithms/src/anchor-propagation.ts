@@ -32,7 +32,7 @@ export function applyLocalAffine(point: { x: number; y: number }, anchors: Ancho
   const predicted = { x: affine[0] * point.x + affine[1] * point.y + affine[2], y: affine[3] * point.x + affine[4] * point.y + affine[5] };
   const residuals = anchors.map(anchor => Math.hypot(affine[0] * anchor.reference.x + affine[1] * anchor.reference.y + affine[2] - anchor.current.x, affine[3] * anchor.reference.x + affine[4] * anchor.reference.y + affine[5] - anchor.current.y));
   const residual = residuals.sort((a, b) => a - b)[Math.floor(residuals.length / 2)] ?? Infinity;
-  return { accepted: residual <= 5, point: predicted, residual, reason: residual <= 5 ? undefined : "predicted median error exceeds 5 px" };
+  return { accepted: residual <= 5, point: predicted, residual, matrix: affine, reason: residual <= 5 ? undefined : "predicted median error exceeds 5 px" };
 }
 
 export function evaluateRecoveryAnchors(anchors: Anchor[], bounds: { width: number; height: number }) {

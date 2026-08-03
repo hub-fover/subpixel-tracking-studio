@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MultiPointTrack, PointSeed } from "@subpixel/contracts";
-import { appendRiskNotice, appendTracks, clearRiskNotices, createPointSetState, flattenTracks, pointRows, summarizeProcessing } from "./pointSetState";
+import { appendRiskNotice, appendTracks, clearRiskNotices, clonePointSetState, createPointSetState, flattenTracks, pointRows, summarizeProcessing } from "./pointSetState";
 
 const seed = (id: string): PointSeed => ({
   pointId: id, click: { x: 10, y: 20 }, snapped: { x: 10, y: 20 }, roi: { x: 0, y: 0, width: 20, height: 20 },
@@ -9,6 +9,7 @@ const seed = (id: string): PointSeed => ({
 const track = (pointId: string, frame: number): MultiPointTrack => ({
   pointId, frame, timestampMs: frame * 10, predicted: { x: 10, y: 20 }, refined: { x: 10.1, y: 20.2 }, model: "blob",
   confidence: .9, residual: .1, flowErrorForwardBackward: null, ncc: .9, descriptorDistance: null, epipolarError: null,
+  predictionSource: "previous-position", innovationPx: .22, localAffineResidualPx: null, gateFailures: [], candidateUniqueness: null,
   state: "valid", relocationMethod: "local-correlation",
 });
 
@@ -56,5 +57,16 @@ describe("point set state", () => {
     const state = createPointSetState(seeds);
     expect(pointRows(state)).toHaveLength(100);
     expect(pointRows(state).at(-1)?.pointId).toBe("p-100");
+  });
+
+  it("freezes tracks and registrations for recovery rollback", () => {
+    let state = createPointSetState([seed("p-001")]);
+    state = appendTracks(state, [track("p-001", 1)]);
+    const snapshot = clonePointSetState(state);
+    state.tracksByPoint.get("p-001")![0].refined.x = 999;
+    state.seeds[0].snapped.x = 888;
+
+    expect(snapshot.tracksByPoint.get("p-001")![0].refined.x).toBe(10.1);
+    expect(snapshot.seeds[0].snapped.x).toBe(10);
   });
 });

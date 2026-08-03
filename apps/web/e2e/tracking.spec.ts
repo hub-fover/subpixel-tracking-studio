@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { readFile } from "node:fs/promises";
 
 const sample = "C:\\Users\\biaoh\\Desktop\\1\\圆\\1.jpg";
 
@@ -54,4 +55,24 @@ test("report center exposes frozen point data and explicit asset settings", asyn
   await page.getByRole("button", { name: "报告" }).click(); await expect(page.getByRole("dialog", { name: "报告中心" })).toBeVisible();
   await expect(page.getByText("确认点")).toBeVisible(); await page.getByRole("button", { name: "导出设置" }).click();
   await expect(page.getByText("报告资产")).toBeVisible(); await expect(page.getByLabel("图片包")).toHaveValue("full"); expect(apiRequests).toEqual([]);
+});
+
+test("browser PDF export embeds a searchable Chinese TrueType font", async ({ page }) => {
+  test.setTimeout(60_000);
+  const errors: string[] = []; const apiRequests: string[] = [];
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  page.on("request", request => { if (request.url().includes("/api/")) apiRequests.push(request.url()); });
+  await page.goto("/"); await importSample(page); await page.getByLabel("提取类型").selectOption("blob-center");
+  await dragRoi(page, { x: .4, y: .3 }, { x: .6, y: .6 });
+  await expect(page.locator(".draft-ready")).toBeVisible({ timeout: 10_000 }); await page.getByRole("button", { name: "确认点" }).click();
+  await page.getByRole("button", { name: "报告" }).click(); await page.getByRole("button", { name: "导出设置" }).click();
+  await page.getByLabel("项目名称").fill("大视角中文项目"); await page.getByLabel("备注").fill("字体与防漂移复核");
+  await page.getByRole("button", { name: "刷新数据快照" }).click();
+  const downloadPromise = page.waitForEvent("download"); await page.getByRole("button", { name: "PDF", exact: true }).click();
+  const download = await downloadPromise;
+  if (process.env.PDF_QA_PATH) await download.saveAs(process.env.PDF_QA_PATH);
+  const path = await download.path(); expect(path).not.toBeNull();
+  const binary = (await readFile(path!)).toString("latin1");
+  expect(binary).toContain("/FontFile2"); expect(binary).toContain("/ToUnicode");
+  expect(errors.filter(message => /font|PubSub|jsPDF/i.test(message))).toEqual([]); expect(apiRequests).toEqual([]);
 });

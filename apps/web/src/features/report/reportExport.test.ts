@@ -1,14 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReportManifestSchema, type ReportModel } from "@subpixel/contracts";
 import {
   buildReportCsvFiles,
   buildReportManifest,
   buildReportBundle,
+  buildReportPdf,
   csvWithBom,
   sanitizeReportFileName,
   reportFileStem,
+  validateTrueTypeFont,
   type ReportAssetResult
 } from "./reportExport";
+import { resetReportPdfFontCache } from "./reportPdfFont";
+
+const validFont = readFileSync(new URL("../../../public/fonts/NotoSansSC-Variable.ttf", import.meta.url));
 
 const report = {
   metadata: { reportNumber: "R-1", reportId: "report-1", projectName: "项目/一", testId: "T-1", operator: "", notes: "备注", sourceFile: "input.png", generatedAt: "2026-08-02T08:00:00.000Z", buildCommit: "dev" },
@@ -20,6 +26,22 @@ const report = {
 } as ReportModel;
 
 describe("report package builders", () => {
+  beforeEach(() => {
+    resetReportPdfFontCache();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(validFont, { status: 200 })));
+  });
+  afterEach(() => {
+    resetReportPdfFontCache();
+    vi.unstubAllGlobals();
+  });
+
+  it("rejects CFF OpenType fonts before jsPDF can silently corrupt Chinese text", async () => {
+    const cff = new Uint8Array([0x4f, 0x54, 0x54, 0x4f, 0, 1, 2, 3]);
+    expect(() => validateTrueTypeFont(cff)).toThrow(/TrueType/i);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(cff, { status: 200 })));
+    await expect(buildReportPdf(report)).rejects.toMatchObject({ code: "report.pdf-font-invalid" });
+  });
+
   it("cleans unsafe report filenames without changing the extension", () => {
     expect(sanitizeReportFileName("项目/一:测试?.pdf")).toBe("项目_一_测试_.pdf");
     expect(reportFileStem(report)).toContain("项目_一_");
@@ -36,6 +58,31 @@ describe("report package builders", () => {
     expect(Object.keys(files)).toEqual(["points.csv", "tracks.csv", "registrations.csv", "events.csv", "risks.csv"]);
     expect(files["points.csv"]).toContain("p-1");
     expect(files["points.csv"]).toContain("p-2");
+  });
+
+  it("exports drift diagnostics and registration coordinate-frame provenance", () => {
+    const diagnosticReport: ReportModel = {
+      ...report,
+      tracks: [{
+        pointId: "p-1", frame: 5, timestampMs: 160, predicted: { x: 10, y: 20 }, refined: { x: 10.25, y: 19.75 },
+        model: "circle", confidence: .9, residual: .08, residualSemantics: "geometric-fit-error-px", loweRatio: null,
+        flowErrorForwardBackward: null, ncc: .85, descriptorDistance: null, epipolarError: null,
+        predictionSource: "local-affine", innovationPx: .354, localAffineResidualPx: .6,
+        gateFailures: ["tracking.marker-ambiguous"], candidateUniqueness: 1.31, state: "suspect", relocationMethod: "feature-refine"
+      }],
+      registrations: [{
+        frame: 5, sourceFrame: 0, targetFrame: 5, method: "sift-homography", matchCount: 120, inlierCount: 90,
+        inlierRatio: .75, medianReprojectionError: 1.1, inlierCoverage: .42, medianSymmetricTransferError: 1.3,
+        transformConsistencyError: 2.2, accepted: true, reason: null
+      }]
+    };
+    const files = buildReportCsvFiles(diagnosticReport);
+
+    expect(files["tracks.csv"]).toContain("prediction_source,innovation_px,local_affine_residual_px,gate_failures,candidate_uniqueness");
+    expect(files["tracks.csv"]).toContain("local-affine");
+    expect(files["tracks.csv"]).toContain("tracking.marker-ambiguous");
+    expect(files["registrations.csv"]).toContain("source_frame,target_frame,inlier_coverage,median_symmetric_transfer_error_px,transform_consistency_error_px");
+    expect(files["registrations.csv"]).toContain("0,5");
   });
 
   it("builds a traceable manifest with generated and failed assets", async () => {

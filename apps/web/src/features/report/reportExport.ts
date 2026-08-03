@@ -1,4 +1,7 @@
 import type { ReportManifest, ReportModel } from "@subpixel/contracts";
+import { fontBytesToBase64, loadReportPdfFont, validateTrueTypeFont, validateUnicodePdf } from "./reportPdfFont";
+
+export { validateTrueTypeFont } from "./reportPdfFont";
 
 export type ReportExportProgress = {
   phase: "preflight" | "data" | "pdf" | "xlsx" | "manifest" | "zip" | "complete";
@@ -90,13 +93,41 @@ function trackRows(report: ReportModel) {
     ncc: track.ncc ?? "",
     descriptor_distance: track.descriptorDistance ?? "",
     epipolar_error: track.epipolarError ?? "",
+    prediction_source: track.predictionSource,
+    innovation_px: track.innovationPx,
+    local_affine_residual_px: track.localAffineResidualPx ?? "",
+    gate_failures: JSON.stringify(track.gateFailures),
+    candidate_uniqueness: track.candidateUniqueness ?? "",
     state: track.state,
     relocation_method: track.relocationMethod
   }));
 }
 
+function registrationRows(report: ReportModel) {
+  return report.registrations.map(registration => ({
+    frame: registration.frame,
+    method: registration.method,
+    accepted: registration.accepted ?? "",
+    match_count: registration.matchCount,
+    inlier_count: registration.inlierCount,
+    inlier_ratio: registration.inlierRatio,
+    median_reprojection_error_px: registration.reprojectionErrorSemantics !== "not-available" && Number.isFinite(registration.medianReprojectionError) ? registration.medianReprojectionError : "",
+    reprojection_error_semantics: registration.reprojectionErrorSemantics ?? "pixel-reprojection",
+    p95_latency_ms: registration.p95LatencyMs ?? "",
+    source_frame: registration.sourceFrame ?? "",
+    target_frame: registration.targetFrame ?? registration.frame,
+    inlier_coverage: registration.inlierCoverage ?? "",
+    median_symmetric_transfer_error_px: registration.medianSymmetricTransferError ?? "",
+    transform_consistency_error_px: registration.transformConsistencyError ?? "",
+    transform_kind: registration.transform?.kind ?? "",
+    transform_matrix: registration.transform ? JSON.stringify(registration.transform.matrix) : "",
+    inverse_transform_matrix: registration.inverseTransform ? JSON.stringify(registration.inverseTransform.matrix) : "",
+    reason: registration.reason ?? ""
+  }));
+}
+
 const POINT_COLUMNS = ["point_id", "model", "grade", "final_state", "sample_count", "valid_ratio", "lost_ratio", "start_x_px", "start_y_px", "end_x_px", "end_y_px", "delta_x_px", "delta_y_px", "confidence_p50", "confidence_p95", "gating_failures", "relocation_methods"];
-const TRACK_COLUMNS = ["point_id", "frame", "timestamp_ms", "predicted_x_px", "predicted_y_px", "x_px", "y_px", "model", "residual", "residual_semantics", "confidence", "lowe_ratio", "flow_fb_error", "ncc", "descriptor_distance", "epipolar_error", "state", "relocation_method"];
+const TRACK_COLUMNS = ["point_id", "frame", "timestamp_ms", "predicted_x_px", "predicted_y_px", "x_px", "y_px", "model", "residual", "residual_semantics", "confidence", "lowe_ratio", "flow_fb_error", "ncc", "descriptor_distance", "epipolar_error", "state", "relocation_method", "prediction_source", "innovation_px", "local_affine_residual_px", "gate_failures", "candidate_uniqueness"];
 
 export function buildReportCsvFiles(report: ReportModel): Record<string, string> {
   const points = pointRows(report);
@@ -104,17 +135,7 @@ export function buildReportCsvFiles(report: ReportModel): Record<string, string>
   return {
     "points.csv": table(points, POINT_COLUMNS),
     "tracks.csv": table(tracks, TRACK_COLUMNS),
-    "registrations.csv": table(report.registrations.map(registration => ({
-      frame: registration.frame,
-      method: registration.method,
-      accepted: registration.accepted ?? "",
-      match_count: registration.matchCount,
-      inlier_count: registration.inlierCount,
-      inlier_ratio: registration.inlierRatio,
-      median_reprojection_error_px: Number.isFinite(registration.medianReprojectionError) ? registration.medianReprojectionError : "",
-      p95_latency_ms: registration.p95LatencyMs ?? "",
-      reason: registration.reason ?? ""
-    })), ["frame", "method", "accepted", "match_count", "inlier_count", "inlier_ratio", "median_reprojection_error_px", "p95_latency_ms", "reason"]),
+    "registrations.csv": table(registrationRows(report), ["frame", "method", "accepted", "match_count", "inlier_count", "inlier_ratio", "median_reprojection_error_px", "reprojection_error_semantics", "p95_latency_ms", "source_frame", "target_frame", "inlier_coverage", "median_symmetric_transfer_error_px", "transform_consistency_error_px", "transform_kind", "transform_matrix", "inverse_transform_matrix", "reason"]),
     "events.csv": table([...report.events.map(event => ({ ...event })), ...report.humanInterventions], ["kind", "frame", "pointId", "message", "anchorCount", "coverage", "inlierRatio"]),
     "risks.csv": table(report.risks.map(risk => ({ ...risk })), ["id", "code", "severity", "frame", "pointId", "message", "action", "recoverable"])
   };
@@ -195,7 +216,7 @@ export async function buildReportXlsx(report: ReportModel, options?: ReportBuild
   add("摘要", [{ ...report.execution, grade: report.grade }]);
   add("点", pointRows(report));
   add("轨迹", trackRows(report));
-  add("配准", report.registrations.map(registration => ({ ...registration })));
+  add("配准", registrationRows(report));
   add("事件", [...report.events.map(event => ({ ...event })), ...report.humanInterventions]);
   add("风险", report.risks.map(risk => ({ ...risk })));
   add("参数", [{ ...report.thresholds, ...report.options }]);
@@ -206,31 +227,38 @@ export async function buildReportXlsx(report: ReportModel, options?: ReportBuild
 
 export async function buildReportPdf(report: ReportModel, annotatedImage?: string, options?: ReportBuildOptions): Promise<Blob> {
   checkCancelled(options?.signal);
+  const font = await loadReportPdfFont(options?.signal);
   const { jsPDF } = await import("jspdf");
   const doc = new jsPDF({ orientation: "portrait", unit: "pt" });
-  try {
-    const response = await fetch(`${import.meta.env.BASE_URL ?? "/"}fonts/NotoSansSC-Regular.otf`, { signal: options?.signal });
-    if (!response.ok) throw new Error(`font request failed: ${response.status}`);
-    const buffer = new Uint8Array(await response.arrayBuffer());
-    let binary = "";
-    for (let index = 0; index < buffer.length; index += 0x8000) binary += String.fromCharCode(...buffer.subarray(index, Math.min(index + 0x8000, buffer.length)));
-    const base64 = btoa(binary);
-    doc.addFileToVFS("NotoSansSC-Regular.otf", base64);
-    doc.addFont("NotoSansSC-Regular.otf", "NotoSansSC", "normal");
-    doc.setFont("NotoSansSC");
-  } catch (error) {
-    if ((error as { name?: string }).name === "AbortError") throw cancelledError();
-    doc.setFont("helvetica");
-  }
+  doc.addFileToVFS("NotoSansSC-Variable.ttf", fontBytesToBase64(font));
+  doc.addFont("NotoSansSC-Variable.ttf", "NotoSansSC", "normal");
+  doc.setFont("NotoSansSC");
   const title = "亚像素特征提取与跟踪报告";
   const write = (value: string, x: number, y: number, size = 10) => { doc.setFontSize(size); doc.text(value, x, y); };
+  const writeWrapped = (value: string, x: number, y: number, width: number, size = 10) => {
+    doc.setFontSize(size);
+    const lines = doc.splitTextToSize(value, width) as string[];
+    doc.text(lines, x, y);
+    return y + Math.max(1, lines.length) * (size + 3);
+  };
   write(title, 42, 52, 18);
   write(`报告编号: ${report.metadata.reportNumber}`, 42, 74);
   write(`项目: ${report.metadata.projectName || "未填写"}    试验: ${report.metadata.testId || "未填写"}`, 42, 92);
-  write(`质量结论: ${report.grade}    点数: ${report.execution.pointCount}    帧数: ${report.execution.frameCount}`, 42, 110);
-  write("说明：质量等级仅代表算法门控结果；无标定和计量溯源时不构成计量检定结论。", 42, 130, 9);
-  if (annotatedImage) doc.addImage(annotatedImage, "PNG", 42, 148, 510, 300);
-  let y = annotatedImage ? 478 : 160;
+  write(`操作人: ${report.metadata.operator || "未填写"}    生成时间: ${report.metadata.generatedAt}`, 42, 110, 9);
+  write(`质量结论: ${report.grade}    点数: ${report.execution.pointCount}    帧数: ${report.execution.frameCount}`, 42, 128);
+  let coverY = writeWrapped(`备注: ${report.metadata.notes || "无"}`, 42, 146, 510, 9);
+  coverY = writeWrapped("说明：质量等级仅代表算法门控结果；无标定和计量溯源时不构成计量检定结论。", 42, coverY + 3, 510, 9);
+  let y = coverY + 12;
+  if (annotatedImage) {
+    const image = doc.getImageProperties(annotatedImage);
+    const scale = Math.min(510 / image.width, 285 / image.height);
+    const width = image.width * scale; const height = image.height * scale;
+    if (y + height > 760) { doc.addPage(); y = 52; }
+    const format = annotatedImage.startsWith("data:image/jpeg") ? "JPEG" : "PNG";
+    doc.addImage(annotatedImage, format, 42 + (510 - width) / 2, y, width, height);
+    y += height + 28;
+  }
+  if (y > 760) { doc.addPage(); y = 52; }
   write("执行摘要", 42, y, 14); y += 22;
   write(`有效率 ${(report.execution.validRatio * 100).toFixed(2)}%    失锁率 ${(report.execution.lostRatio * 100).toFixed(2)}%    P95 延迟 ${report.execution.processingStats.p95LatencyMs.toFixed(2)} ms`, 42, y); y += 30;
   write("逐点质量", 42, y, 14); y += 18;
@@ -245,7 +273,9 @@ export async function buildReportPdf(report: ReportModel, annotatedImage?: strin
   write("方法、阈值与限制", 42, y + 20, 14);
   write(`阈值：有效率 ${report.thresholds.passValidRatio}/${report.thresholds.reviewValidRatio}，置信度P50 ${report.thresholds.passConfidenceP50}/${report.thresholds.reviewConfidenceP50}，失锁率 ${report.thresholds.failLostRatio}。`, 42, y + 42, 9);
   write("原始逐帧数据保存在 JSON/XLSX/CSV；图表仅做 min/max 保真采样。", 42, y + 58, 9);
-  return doc.output("blob");
+  const output = new Uint8Array(doc.output("arraybuffer"));
+  validateUnicodePdf(output);
+  return new Blob([output], { type: "application/pdf" });
 }
 
 export async function buildReportBundle(report: ReportModel, assets: ReportAssetResult[] = [], annotatedImage?: string, options?: ReportBuildOptions): Promise<{ blob: Blob; manifest: ReportManifest }> {

@@ -213,7 +213,7 @@ export function buildReportModel(snapshot: ReportSnapshot, metadata: ReportMetad
   const droppedFrameRatio = processing.droppedFrames / Math.max(1, processing.processedFrames + processing.droppedFrames);
   const registrations = snapshot.registrations.map(registration => FrameRegistrationSchema.parse(registration));
   const inlierRatios = registrations.map(registration => registration.inlierRatio).filter(Number.isFinite);
-  const reprojections = registrations.map(registration => registration.medianReprojectionError).filter(Number.isFinite);
+  const reprojections = registrations.filter(registration => registration.reprojectionErrorSemantics !== "not-available").map(registration => registration.medianReprojectionError).filter(Number.isFinite);
   const registration = {
     count: registrations.length,
     acceptedCount: registrations.filter(registration => registration.accepted === true).length,

@@ -4,6 +4,7 @@ import type { QualityThresholds, ReportMetadata, ReportManifest, ReportModel, Re
 import type { ExportFormat } from "./exportClient";
 import type { ExportOptions, ExportResult } from "./exportClient";
 import type { ReportExportProgress } from "./reportExport";
+import { resetReportPdfFontCache } from "./reportPdfFont";
 
 type Props = {
   open: boolean;
@@ -52,6 +53,7 @@ export function ReportCenter({ open, report, onClose, onRefresh, onExport }: Pro
       if ((error as { code?: string }).code !== "export.cancelled") setExportError(error instanceof Error ? error.message : "报告生成失败");
     } finally { setExportState(undefined); }
   };
+  const pdfFailed = Boolean(exportError?.includes("字体") || failedAssets.some(asset => asset.path === "report.pdf"));
 
   return <div className="report-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
     <aside className="report-center" role="dialog" aria-modal="true" aria-label="报告中心">
@@ -70,6 +72,7 @@ export function ReportCenter({ open, report, onClose, onRefresh, onExport }: Pro
           {exportState ? <div className="report-export-progress" role="status"><div className="progress-heading"><strong>{exportState.progress.message}</strong><span>{exportState.progress.completed}/{exportState.progress.total}</span></div><progress value={exportState.progress.completed} max={exportState.progress.total} /><button className="source-button danger" onClick={() => exportState.controller.abort()}>取消生成</button></div> : <><button className="source-button" onClick={() => void startExport("bundle")}><Download size={15} />生成 ZIP 报告包</button><button className="source-button" onClick={() => void startExport("pdf")}>PDF</button><button className="source-button" onClick={() => void startExport("xlsx")}>XLSX</button><button className="source-button" onClick={() => void startExport("csv")}>CSV</button><button className="source-button" onClick={() => void startExport("json")}>JSON</button></>}
           {exportError && <p className="error-note" role="alert">{exportError}；可重试生成。</p>}
           {failedAssets.length > 0 && <div className="report-failed-assets" role="status"><strong>以下资产生成失败</strong>{failedAssets.map(asset => <small key={asset.path}>{asset.path}: {asset.failureReason ?? "未知原因"}</small>)}</div>}
+          {pdfFailed && !exportState && <button className="source-button" onClick={() => { resetReportPdfFontCache(); void startExport("pdf"); }}><RefreshCw size={15} />重试字体加载并生成 PDF</button>}
         </footer>
       </>}
     </aside>

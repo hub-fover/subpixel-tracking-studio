@@ -19,11 +19,14 @@ describe("multi-point primitives", () => {
   });
 
   it("rejects natural identity when any strict matching gate fails", async () => {
-    const { validateNaturalMatch } = await import("../natural-features");
+    const { sampsonError, validateNaturalMatch } = await import("../natural-features");
     expect(validateNaturalMatch({ forwardBackwardError: 1, ncc: 0.8, epipolarError: 1, loweRatio: 0.7 }).accepted).toBe(true);
     expect(validateNaturalMatch({ forwardBackwardError: 1.6, ncc: 0.8, epipolarError: 1, loweRatio: 0.7 }).accepted).toBe(false);
     expect(validateNaturalMatch({ forwardBackwardError: 1, ncc: 0.8, epipolarError: 1, loweRatio: 0.8 }).reason).toContain("Lowe");
     expect(validateNaturalMatch({ forwardBackwardError: 1, ncc: 0.8 }).accepted).toBe(true);
+    const horizontalEpipolarGeometry = [0, 0, 0, 0, 0, -1, 0, 1, 0];
+    expect(sampsonError({ x: 12, y: 20 }, { x: 40, y: 20 }, horizontalEpipolarGeometry)).toBeCloseTo(0, 8);
+    expect(sampsonError({ x: 12, y: 20 }, { x: 40, y: 24 }, horizontalEpipolarGeometry)).toBeGreaterThan(2);
   });
 
   it("does not silently accept a natural observation without identity metrics", () => {
@@ -32,6 +35,59 @@ describe("multi-point primitives", () => {
     const result = tracker.process([{ pointId: seed.pointId, predicted: seed.snapped, refined: seed.snapped, confidence: .9, residual: .1 }]);
     expect(result.tracks[0].pointId).toBe(seed.pointId);
     expect(result.tracks[0].state).toBe("suspect");
+  });
+
+  it("pauses when suspect and lost points together reach twenty percent", () => {
+    const seeds: PointSeed[] = Array.from({ length: 5 }, (_, index) => ({
+      pointId: `p-${index}`,
+      click: { x: index * 10, y: 10 },
+      snapped: { x: index * 10, y: 10 },
+      roi: { x: index * 10, y: 5, width: 9, height: 9 },
+      groupId: "natural",
+      candidateScore: .9,
+      model: "natural-keypoint"
+    }));
+    const tracker = createMultiPointTracker(seeds); tracker.initialize();
+    const result = tracker.process(seeds.map((item, index) => ({
+      pointId: item.pointId,
+      predicted: item.snapped,
+      refined: item.snapped,
+      confidence: .9,
+      residual: .1,
+      metrics: { forwardBackwardError: index === 0 ? 2 : .5, ncc: .9, epipolarError: 1, loweRatio: .6 }
+    })));
+
+    expect(result.tracks[0].state).toBe("suspect");
+    expect(result.paused).toBe(true);
+  });
+
+  it("pauses for an explicitly rejected registration even when summary metrics look acceptable", () => {
+    const seeds: PointSeed[] = Array.from({ length: 5 }, (_, index) => ({
+      pointId: `p-${index}`,
+      click: { x: index * 20, y: index * 15 },
+      snapped: { x: index * 20, y: index * 15 },
+      roi: { x: index * 20, y: index * 15, width: 12, height: 12 },
+      groupId: "markers",
+      candidateScore: .9,
+      model: "circle"
+    }));
+    const tracker = createMultiPointTracker(seeds);
+    tracker.initialize();
+    const result = tracker.process(seeds.map(item => ({
+      pointId: item.pointId,
+      predicted: item.snapped,
+      refined: item.snapped,
+      confidence: .95,
+      residual: .1
+    })), 33, {
+      accepted: false,
+      matchCount: 120,
+      inlierRatio: .8,
+      medianReprojectionError: .5
+    });
+
+    expect(result.paused).toBe(true);
+    expect(result.tracks.every(track => track.state === "paused")).toBe(true);
   });
 
   it("preserves descriptor distance on a gated natural track", () => {
@@ -74,6 +130,25 @@ describe("multi-point primitives", () => {
       { reference: { x: 90, y: 10 }, current: { x: 94, y: 15 } }
     ];
     expect(evaluateRecoveryAnchors(anchors, { width: 100, height: 100 }).accepted).toBe(true);
+  });
+
+  it("restores positions, frame counter, and paused state from a recovery snapshot", () => {
+    const point: PointSeed = { pointId: "p-001", click: { x: 10, y: 10 }, snapped: { x: 10, y: 10 }, roi: { x: 4, y: 4, width: 13, height: 13 }, groupId: "target", candidateScore: .9, model: "blob" };
+    const tracker = createMultiPointTracker([point]);
+    tracker.initialize();
+    tracker.process([]);
+    const snapshot = tracker.snapshot();
+    tracker.applyAnchors([
+      { reference: { x: 0, y: 0 }, current: { x: 20, y: 30 } },
+      { reference: { x: 20, y: 0 }, current: { x: 40, y: 30 } },
+      { reference: { x: 0, y: 20 }, current: { x: 20, y: 50 } }
+    ]);
+    expect(tracker.paused).toBe(false);
+
+    tracker.restore(snapshot);
+
+    expect(tracker.paused).toBe(true);
+    expect(tracker.snapshot()).toEqual(snapshot);
   });
 
   it("locates a translated template at subpixel precision using real pixel values", () => {

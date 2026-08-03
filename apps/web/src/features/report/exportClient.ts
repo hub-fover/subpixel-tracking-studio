@@ -38,10 +38,15 @@ export function overlayCanvasSize(source: { width?: number; height?: number; vid
   return { width: source.width ?? source.videoWidth ?? 1, height: source.height ?? source.videoHeight ?? 1 };
 }
 
+export function reportPreviewCanvasSize(source: { width: number; height: number }, maxDimension = 2048) {
+  const scale = Math.min(1, maxDimension / Math.max(source.width, source.height));
+  return { width: Math.max(1, Math.round(source.width * scale)), height: Math.max(1, Math.round(source.height * scale)), scale };
+}
+
 export function buildExportRows(payload: ExportPayload) {
   if (payload.multiTracks?.length) return [...payload.multiTracks]
     .sort((a, b) => a.frame - b.frame || a.pointId.localeCompare(b.pointId))
-    .map(track => ({ point_id: track.pointId, frame: track.frame, timestamp_ms: track.timestampMs, predicted_x_px: track.predicted.x, predicted_y_px: track.predicted.y, x_px: track.refined.x, y_px: track.refined.y, model: track.model, residual: track.residual, residual_semantics: reportResidualSemantics(track.model), confidence: track.confidence, flow_fb_error: track.flowErrorForwardBackward, ncc: track.ncc, descriptor_distance: track.descriptorDistance, lowe_ratio: track.loweRatio ?? null, epipolar_error: track.epipolarError, state: track.state, relocation_method: track.relocationMethod }));
+    .map(track => ({ point_id: track.pointId, frame: track.frame, timestamp_ms: track.timestampMs, predicted_x_px: track.predicted.x, predicted_y_px: track.predicted.y, x_px: track.refined.x, y_px: track.refined.y, model: track.model, residual: track.residual, residual_semantics: reportResidualSemantics(track.model), confidence: track.confidence, flow_fb_error: track.flowErrorForwardBackward, ncc: track.ncc, descriptor_distance: track.descriptorDistance, lowe_ratio: track.loweRatio ?? null, epipolar_error: track.epipolarError, prediction_source: track.predictionSource, innovation_px: track.innovationPx, local_affine_residual_px: track.localAffineResidualPx, gate_failures: track.gateFailures, candidate_uniqueness: track.candidateUniqueness, state: track.state, relocation_method: track.relocationMethod }));
   return [...payload.tracks].sort((a, b) => a.frame - b.frame).map(track => ({ point_id: "p-001", frame: track.frame, timestamp_ms: track.timestampMs, x_px: track.x, y_px: track.y, model: track.model, residual: track.residual, confidence: track.confidence, state: track.state, duration_ms: track.durationMs }));
 }
 
@@ -66,14 +71,16 @@ export function buildExportDocument(payload: Pick<ExportPayload, "points" | "see
 
 function download(blob: Blob, name: string) { const anchor = document.createElement("a"); anchor.href = URL.createObjectURL(blob); anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(anchor.href), 1000); }
 
-function markedCanvas(payload: ExportPayload, image = payload.currentImage ?? payload.image) {
+function markedCanvas(payload: ExportPayload, image = payload.currentImage ?? payload.image, maxDimension?: number) {
   const source = image as { width?: number; height?: number; videoWidth?: number; videoHeight?: number } | undefined;
-  const size = overlayCanvasSize(source ?? {}); const canvas = document.createElement("canvas"); canvas.width = size.width; canvas.height = size.height;
-  const ctx = canvas.getContext("2d")!; ctx.fillStyle = "#111820"; ctx.fillRect(0, 0, size.width, size.height); if (image) ctx.drawImage(image, 0, 0, size.width, size.height);
-  ctx.strokeStyle = "#f5b700"; ctx.lineWidth = Math.max(1, size.width / 3000); ctx.strokeRect(payload.roi.x, payload.roi.y, payload.roi.width, payload.roi.height);
-  ctx.strokeStyle = "#00d4bd"; for (const track of payload.multiTracks ?? []) { ctx.beginPath(); ctx.arc(track.refined.x, track.refined.y, Math.max(2, size.width / 1200), 0, Math.PI * 2); ctx.stroke(); }
-  for (const track of payload.tracks) { ctx.beginPath(); ctx.arc(track.x, track.y, Math.max(2, size.width / 1200), 0, Math.PI * 2); ctx.stroke(); }
-  for (const seed of payload.points ?? payload.seeds ?? []) { ctx.beginPath(); ctx.arc(seed.snapped.x, seed.snapped.y, Math.max(2, size.width / 1200), 0, Math.PI * 2); ctx.stroke(); }
+  const nativeSize = overlayCanvasSize(source ?? {}); const output = maxDimension ? reportPreviewCanvasSize(nativeSize, maxDimension) : { ...nativeSize, scale: 1 };
+  const canvas = document.createElement("canvas"); canvas.width = output.width; canvas.height = output.height;
+  const ctx = canvas.getContext("2d")!; ctx.fillStyle = "#111820"; ctx.fillRect(0, 0, output.width, output.height); if (image) ctx.drawImage(image, 0, 0, output.width, output.height);
+  const scale = output.scale;
+  ctx.strokeStyle = "#f5b700"; ctx.lineWidth = Math.max(1, output.width / 3000); ctx.strokeRect(payload.roi.x * scale, payload.roi.y * scale, payload.roi.width * scale, payload.roi.height * scale);
+  ctx.strokeStyle = "#00d4bd"; for (const track of payload.multiTracks ?? []) { ctx.beginPath(); ctx.arc(track.refined.x * scale, track.refined.y * scale, Math.max(2, output.width / 1200), 0, Math.PI * 2); ctx.stroke(); }
+  for (const track of payload.tracks) { ctx.beginPath(); ctx.arc(track.x * scale, track.y * scale, Math.max(2, output.width / 1200), 0, Math.PI * 2); ctx.stroke(); }
+  for (const seed of payload.points ?? payload.seeds ?? []) { ctx.beginPath(); ctx.arc(seed.snapped.x * scale, seed.snapped.y * scale, Math.max(2, output.width / 1200), 0, Math.PI * 2); ctx.stroke(); }
   return canvas;
 }
 
@@ -85,7 +92,7 @@ export async function exportTracking(format: ExportFormat, payload: ExportPayloa
     if (!payload.reportModel) throw Object.assign(new Error("请先打开报告中心生成冻结报告数据"), { code: "export.report-required", recoverable: true });
     const toPng = async (source: CanvasImageSource | undefined): Promise<Blob | undefined> => {
       if (!source) return undefined;
-      const canvas = markedCanvas(payload, source);
+      const canvas = markedCanvas(payload, source, payload.reportModel?.options.imageQuality === "lightweight" ? 2048 : undefined);
       return new Promise<Blob | undefined>(resolve => canvas.toBlob(blob => resolve(blob ?? undefined), "image/png"));
     };
     let reference: Blob | undefined;
@@ -96,12 +103,12 @@ export async function exportTracking(format: ExportFormat, payload: ExportPayloa
       reference ? { kind: "image", path: "media/reference-points.png", data: reference } : { kind: "image", path: "media/reference-points.png", error: "没有可用参考帧" },
       current ? { kind: "image", path: "media/current-tracks.png", data: current } : { kind: "image", path: "media/current-tracks.png", error: "没有可用当前帧" }
     ];
-    const annotatedDataUrl = current ? await new Promise<string | undefined>(resolve => { const reader = new FileReader(); reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : undefined); reader.onerror = () => resolve(undefined); reader.readAsDataURL(current); }) : undefined;
+    const annotatedDataUrl = (payload.currentImage ?? payload.image) ? markedCanvas(payload, payload.currentImage ?? payload.image, 2048).toDataURL("image/jpeg", .9) : undefined;
     const { blob, manifest } = await buildReportBundle(payload.reportModel, assets, annotatedDataUrl, options);
     download(blob, `${reportFileStem(payload.reportModel)}.zip`);
     return { manifest };
   }
-  if (payload.reportModel && format === "pdf") { let imageData: string | undefined; try { imageData = (payload.currentImage ?? payload.image) ? markedCanvas(payload, payload.currentImage ?? payload.image).toDataURL("image/png") : undefined; } catch { imageData = undefined; } download(await buildReportPdf(payload.reportModel, imageData, options), `${reportFileStem(payload.reportModel)}.pdf`); return undefined; }
+  if (payload.reportModel && format === "pdf") { let imageData: string | undefined; try { imageData = (payload.currentImage ?? payload.image) ? markedCanvas(payload, payload.currentImage ?? payload.image, 2048).toDataURL("image/jpeg", .9) : undefined; } catch { imageData = undefined; } download(await buildReportPdf(payload.reportModel, imageData, options), `${reportFileStem(payload.reportModel)}.pdf`); return undefined; }
   if (payload.reportModel && format === "xlsx") { download(await buildReportXlsx(payload.reportModel, options), `${reportFileStem(payload.reportModel)}.xlsx`); return undefined; }
   if (payload.reportModel && format === "json") { download(new Blob([reportJson(payload.reportModel)], { type: "application/json" }), `${reportFileStem(payload.reportModel)}.json`); return undefined; }
   if (format === "json") { download(new Blob([JSON.stringify({ generatedAt: new Date().toISOString(), ...document }, null, 2)], { type: "application/json" }), "subpixel-results.json"); return undefined; }
@@ -111,7 +118,7 @@ export async function exportTracking(format: ExportFormat, payload: ExportPayloa
     download(new Blob([`\ufeff${csv}`], { type: "text/csv;charset=utf-8" }), "subpixel-results.csv"); return undefined;
   }
   if (format === "xlsx") { const XLSX = await import("xlsx"); const workbook = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(document.points), "points"); XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(document.tracks), "tracks"); XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(document.registrations), "registrations"); XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet([...document.recoveryEvents, ...document.events, ...document.riskNotices, ...(document.processingStats ? [document.processingStats] : [])]), "events"); XLSX.writeFile(workbook, "subpixel-results.xlsx"); return; }
-  if (format === "pdf") { const { jsPDF } = await import("jspdf"); const doc = new jsPDF({ orientation: "landscape" }); doc.setFontSize(18); doc.text("Subpixel Multi-point Tracking Report", 14, 16); doc.setFontSize(10); doc.text(`Points: ${document.points.length}  Samples: ${data.length}`, 14, 25); doc.addImage(markedCanvas(payload).toDataURL("image/jpeg", .85), "JPEG", 14, 32, 170, 106); doc.save("subpixel-report.pdf"); return undefined; }
+  if (format === "pdf") { const { jsPDF } = await import("jspdf"); const doc = new jsPDF({ orientation: "landscape" }); doc.setFontSize(18); doc.text("Subpixel Multi-point Tracking Report", 14, 16); doc.setFontSize(10); doc.text(`Points: ${document.points.length}  Samples: ${data.length}`, 14, 25); doc.addImage(markedCanvas(payload, undefined, 2048).toDataURL("image/jpeg", .85), "JPEG", 14, 32, 170, 106); doc.save("subpixel-report.pdf"); return undefined; }
   const canvas = markedCanvas(payload); if (format === "images") { canvas.toBlob(blob => blob && download(blob, "subpixel-overlay.png"), "image/png"); return undefined; }
   const stream = canvas.captureStream(10); const recorder = new MediaRecorder(stream, { mimeType: "video/webm" }); const chunks: Blob[] = []; recorder.ondataavailable = event => chunks.push(event.data); recorder.onstop = () => download(new Blob(chunks, { type: "video/webm" }), "subpixel-overlay.webm"); recorder.start(); await new Promise(resolve => setTimeout(resolve, 600)); recorder.stop();
   return undefined;

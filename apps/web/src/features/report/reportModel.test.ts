@@ -23,6 +23,8 @@ function track(pointId: string, frame: number, overrides: Partial<MultiPointTrac
     predicted: { x: frame, y: frame }, refined: { x: frame, y: frame },
     model: "circle", confidence: .9, residual: .1,
     flowErrorForwardBackward: null, ncc: null, descriptorDistance: null, epipolarError: null,
+    predictionSource: "previous-position", innovationPx: 0, localAffineResidualPx: null,
+    gateFailures: [], candidateUniqueness: null,
     state: "valid", relocationMethod: "feature-refine", ...overrides
   };
 }

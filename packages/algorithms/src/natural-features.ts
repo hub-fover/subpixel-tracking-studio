@@ -29,6 +29,20 @@ export function chooseSnapCandidate(click: { x: number; y: number }, candidates:
 }
 
 export type NaturalMatchMetrics = { forwardBackwardError: number; ncc: number; epipolarError?: number; loweRatio?: number };
+
+export function sampsonError(reference: { x: number; y: number }, current: { x: number; y: number }, fundamentalMatrix: number[]): number {
+  if (fundamentalMatrix.length !== 9 || fundamentalMatrix.some(value => !Number.isFinite(value))) return Infinity;
+  const [f00, f01, f02, f10, f11, f12, f20, f21, f22] = fundamentalMatrix;
+  const fx0 = f00 * reference.x + f01 * reference.y + f02;
+  const fx1 = f10 * reference.x + f11 * reference.y + f12;
+  const fx2 = f20 * reference.x + f21 * reference.y + f22;
+  const ftx0 = f00 * current.x + f10 * current.y + f20;
+  const ftx1 = f01 * current.x + f11 * current.y + f21;
+  const numerator = current.x * fx0 + current.y * fx1 + fx2;
+  const denominator = fx0 * fx0 + fx1 * fx1 + ftx0 * ftx0 + ftx1 * ftx1;
+  return denominator > 1e-12 ? Math.abs(numerator) / Math.sqrt(denominator) : Infinity;
+}
+
 export function validateNaturalMatch(metrics: NaturalMatchMetrics) {
   const checks: [boolean, string][] = [
     [metrics.forwardBackwardError <= 1.5, "forward/backward flow"],

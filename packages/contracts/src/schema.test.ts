@@ -135,6 +135,9 @@ describe("tracking contracts", () => {
       recoverable: true
     });
     expect(notice.action).toBe("open-settings");
+    for (const code of ["registration.transform-inconsistent", "tracking.local-affine-degenerate", "tracking.marker-ambiguous", "tracking.manual-anchors-required"] as const) {
+      expect(RiskNoticeSchema.safeParse({ ...notice, id: code, code, message: code, action: "select-anchors" }).success).toBe(true);
+    }
     expect(CameraSessionSchema.parse({
       status: "ready",
       facingMode: "environment",
@@ -170,7 +173,14 @@ describe("tracking contracts", () => {
       model: "natural-keypoint", confidence: 0.9, residual: 0.2, flowErrorForwardBackward: 0.4,
       ncc: 0.8, descriptorDistance: 0.5, epipolarError: 0.7, state: "valid", relocationMethod: "local-affine"
     }).pointId).toBe("p-01");
-    expect(FrameRegistrationSchema.parse({ frame: 2, method: "sift-ransac", inlierCount: 120, matchCount: 180, inlierRatio: 2 / 3, medianReprojectionError: 1.2 }).frame).toBe(2);
+    const registration = FrameRegistrationSchema.parse({
+      frame: 2, sourceFrame: 0, targetFrame: 2, method: "sift-homography",
+      inlierCount: 120, matchCount: 180, inlierRatio: 2 / 3,
+      medianReprojectionError: 1.2, reprojectionErrorSemantics: "pixel-reprojection", inlierCoverage: .42,
+      medianSymmetricTransferError: 1.4, transformConsistencyError: .8,
+      inverseTransform: { kind: "homography", matrix: [1, 0, -2, 0, 1, -3, 0, 0, 1] }
+    });
+    expect(registration).toMatchObject({ sourceFrame: 0, targetFrame: 2, method: "sift-homography", inlierCoverage: .42, reprojectionErrorSemantics: "pixel-reprojection" });
     expect(AnchorCorrespondenceSchema.parse({ pointId: "p-01", reference: { x: 10, y: 20 }, current: { x: 12, y: 23 }, confidence: 0.9 }).pointId).toBe("p-01");
     expect(RecoveryEventSchema.parse({ id: "recovery-1", frame: 20, kind: "applied", anchorCount: 6, coverage: 0.4, inlierRatio: 0.8, predictedMedianError: 2.1, reversible: true }).kind).toBe("applied");
   });
@@ -190,11 +200,13 @@ describe("report contracts", () => {
       pointId: "p-01", frame: 0, timestampMs: 0,
       predicted: { x: 10, y: 20 }, refined: { x: 10.1, y: 20.1 },
       model: "natural-keypoint", confidence: .9, residual: .2,
-      loweRatio: .72, state: "valid"
+      loweRatio: .72, state: "valid", predictionSource: "reference-homography",
+      innovationPx: .4, localAffineResidualPx: .7, gateFailures: [], candidateUniqueness: 1.6
     });
 
     expect(job.exports).toEqual(["bundle"]);
     expect(track.loweRatio).toBe(.72);
+    expect(track.predictionSource).toBe("reference-homography");
   });
 
   it("validates report metadata, options, and ordered quality thresholds", () => {

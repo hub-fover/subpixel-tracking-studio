@@ -52,6 +52,28 @@ export function appendRiskNotice(state: PointSetState, notice: RiskNotice): Poin
   return { ...state, riskNotices: [...state.riskNotices.filter(item => item.id !== notice.id), { ...notice, createdAt: notice.createdAt ?? Date.now() }].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0)) };
 }
 
+export function clonePointSetState(state: PointSetState): PointSetState {
+  return {
+    ...state,
+    seeds: state.seeds.map(seed => ({
+      ...seed,
+      click: { ...seed.click }, snapped: { ...seed.snapped }, roi: { ...seed.roi },
+      geometry: seed.geometry ? structuredClone(seed.geometry) : undefined,
+      quality: seed.quality ? { ...seed.quality, gates: { ...seed.quality.gates } } : undefined,
+      template: seed.template ? { ...seed.template, descriptor: [...seed.template.descriptor], gradientTemplate: [...seed.template.gradientTemplate], topology: [...seed.template.topology] } : undefined
+    })),
+    tracksByPoint: new Map([...state.tracksByPoint].map(([pointId, tracks]) => [pointId, tracks.map(track => ({ ...track, predicted: { ...track.predicted }, refined: { ...track.refined }, gateFailures: [...track.gateFailures] }))])),
+    registrations: state.registrations.map(registration => ({ ...registration, transform: registration.transform ? { ...registration.transform, matrix: [...registration.transform.matrix] } : undefined, inverseTransform: registration.inverseTransform ? { ...registration.inverseTransform, matrix: [...registration.inverseTransform.matrix] } : undefined, fundamentalMatrix: registration.fundamentalMatrix ? [...registration.fundamentalMatrix] : undefined })),
+    recoveryEvents: state.recoveryEvents.map(event => ({ ...event })),
+    activePointIds: [...state.activePointIds],
+    riskNotices: state.riskNotices.map(notice => ({ ...notice })),
+    cameraSession: { ...state.cameraSession },
+    processingStats: { ...state.processingStats },
+    referenceFrame: state.referenceFrame ? { ...state.referenceFrame } : undefined,
+    recording: { ...state.recording }
+  };
+}
+
 export function clearRiskNotices(state: PointSetState, predicate: (notice: RiskNotice) => boolean): PointSetState {
   return { ...state, riskNotices: state.riskNotices.filter(notice => !predicate(notice)) };
 }
