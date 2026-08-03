@@ -4,6 +4,9 @@ import {
   QualityThresholdsSchema,
   ReportOptionsSchema,
   type FrameRegistration,
+  type FrameLedgerEntry,
+  type CalibrationScale,
+  type GroundTruthObservation,
   type MultiPointTrack,
   type PointSeed,
   type QualityGrade,
@@ -17,6 +20,7 @@ import {
   type ProcessingStats,
   type TrackingEvent
 } from "@subpixel/contracts";
+import { buildFixedTopology } from "./reportTopology";
 
 export const DEFAULT_QUALITY_THRESHOLDS: QualityThresholds = {
   passValidRatio: .95,
@@ -36,6 +40,10 @@ export type ReportSnapshot = {
   riskNotices: RiskNotice[];
   processingStats: ProcessingStats;
   activePointIds?: string[];
+  frameLedger?: FrameLedgerEntry[];
+  disabledTopologyEdgeIds?: string[];
+  calibration?: CalibrationScale | null;
+  groundTruth?: GroundTruthObservation[];
 };
 
 export type ReportTrack = ReportModel["tracks"][number];
@@ -43,8 +51,8 @@ export type ResidualSemantics = ReportResidualSemantics;
 export type ReportPoint = ReportModel["points"][number];
 export type ReportModelResult = ReportModel;
 
-const STATE_ORDER = ["valid", "suspect", "lost", "reviewed", "paused"] as const;
-const WORST_STATE_RANK: Record<MultiPointTrack["state"], number> = { valid: 0, reviewed: 1, suspect: 2, paused: 3, lost: 4 };
+const STATE_ORDER = ["valid", "provisional", "suspect", "lost", "reviewed", "paused"] as const;
+const WORST_STATE_RANK: Record<MultiPointTrack["state"], number> = { valid: 0, provisional: 1, reviewed: 2, suspect: 3, paused: 4, lost: 5 };
 
 function percentile(values: number[], fraction: number): number | null {
   if (!values.length) return null;
@@ -57,7 +65,8 @@ function percentile(values: number[], fraction: number): number | null {
 }
 
 function rounded(value: number): number {
-  return Math.round(value * 1e12) / 1e12;
+  const result = Math.round(value * 1e12) / 1e12;
+  return Object.is(result, -0) ? 0 : result;
 }
 
 function counts(values: string[]): Record<string, number> {
@@ -79,7 +88,7 @@ export function reportResidualSemantics(model: MultiPointTrack["model"]): Residu
   return "matching-error-model-specific";
 }
 
-function normalizeStateCounts(values: MultiPointTrack["state"][]): Record<"valid" | "suspect" | "lost" | "reviewed" | "paused", number> {
+function normalizeStateCounts(values: MultiPointTrack["state"][]): Record<typeof STATE_ORDER[number], number> {
   const result = Object.fromEntries(STATE_ORDER.map(state => [state, 0])) as Record<typeof STATE_ORDER[number], number>;
   for (const state of values) result[state]++;
   return result;
@@ -90,8 +99,15 @@ function validateThresholds(overrides?: Partial<QualityThresholds>): QualityThre
 }
 
 function sampleChartRows(rows: ReportTrack[], limit = 1000) {
-  const firstValid = rows.find(row => row.state === "valid");
-  const toSample = (row: ReportTrack) => ({ pointId: row.pointId, frame: row.frame, x: row.refined.x, y: row.refined.y, dx: firstValid ? row.refined.x - firstValid.refined.x : null, dy: firstValid ? row.refined.y - firstValid.refined.y : null, confidence: row.confidence, residual: row.residual });
+  const firstValid = rows.find(row => row.state === "valid" || row.state === "provisional");
+  const toSample = (row: ReportTrack) => ({
+    pointId: row.pointId, frame: row.frame, x: row.refined.x, y: row.refined.y,
+    dx: firstValid ? row.refined.x - firstValid.refined.x : null,
+    dy: firstValid ? row.refined.y - firstValid.refined.y : null,
+    confidence: row.confidence, residual: row.residual, innovationPx: row.innovationPx,
+    flowErrorForwardBackward: row.flowErrorForwardBackward, ncc: row.ncc,
+    epipolarError: row.epipolarError, loweRatio: row.loweRatio ?? null, state: row.state
+  });
   if (rows.length <= limit) return rows.map(toSample);
   const required = new Set<number>([0, rows.length - 1]);
   const accessors = [(row: ReportTrack) => row.refined.x, (row: ReportTrack) => row.refined.y, (row: ReportTrack) => row.confidence, (row: ReportTrack) => row.residual];
@@ -139,14 +155,16 @@ function keyFramesFor(rows: ReportTrack[], requested: number): ReportModelResult
 function pointGrade(point: ReportPoint, thresholds: QualityThresholds): QualityGrade {
   if (!point.sampleCount) return "not-evaluated";
   const allStates = point.stateCounts;
-  if (point.finalState === "lost" || point.finalState === "paused" || point.validRatio < thresholds.reviewValidRatio || point.lostRatio >= thresholds.failLostRatio || (point.confidence.p50 ?? 0) < thresholds.reviewConfidenceP50) return "fail";
-  if (point.validRatio < thresholds.passValidRatio || (point.confidence.p50 ?? 0) < thresholds.passConfidenceP50 || allStates.suspect > 0 || allStates.reviewed > 0 || allStates.paused > 0) return "review";
+  const recognizedRatio = (allStates.valid + allStates.provisional + allStates.reviewed) / Math.max(1, point.sampleCount);
+  if (point.finalState === "lost" || point.finalState === "paused" || recognizedRatio < thresholds.reviewValidRatio || point.lostRatio >= thresholds.failLostRatio || (point.confidence.p50 ?? 0) < thresholds.reviewConfidenceP50) return "fail";
+  if (point.validRatio < thresholds.passValidRatio || (point.confidence.p50 ?? 0) < thresholds.passConfidenceP50 || allStates.provisional > 0 || allStates.suspect > 0 || allStates.reviewed > 0 || allStates.paused > 0) return "review";
   return "pass";
 }
 
 function overallGrade(input: { points: ReportPoint[]; tracks: ReportTrack[]; thresholds: QualityThresholds; processing: ProcessingStats; recoveryCount: number; rejectedRegistrations: number; errorRisk: boolean }): QualityGrade {
   if (!input.tracks.length) return "not-evaluated";
   const valid = input.tracks.filter(track => track.state === "valid").length;
+  const recognized = input.tracks.filter(track => track.state === "valid" || track.state === "provisional" || track.state === "reviewed").length;
   const lost = input.tracks.filter(track => track.state === "lost" || track.state === "paused").length;
   const validRatio = valid / input.tracks.length;
   const lostRatio = lost / input.tracks.length;
@@ -154,11 +172,74 @@ function overallGrade(input: { points: ReportPoint[]; tracks: ReportTrack[]; thr
     const pointRows = input.tracks.filter(track => track.pointId === point.pointId);
     return pointRows.at(-1)?.state === "lost" || pointRows.at(-1)?.state === "paused";
   });
-  if (validRatio < input.thresholds.reviewValidRatio || lostRatio >= input.thresholds.failLostRatio || finalByPoint) return "fail";
+  if (recognized / input.tracks.length < input.thresholds.reviewValidRatio || lostRatio >= input.thresholds.failLostRatio || finalByPoint) return "fail";
   const confidence = percentile(input.tracks.map(track => track.confidence), .5) ?? 0;
   if (confidence < input.thresholds.reviewConfidenceP50) return "fail";
-  if (validRatio < input.thresholds.passValidRatio || confidence < input.thresholds.passConfidenceP50 || input.points.some(point => point.grade === "review") || input.recoveryCount > 0 || input.rejectedRegistrations > 0 || input.errorRisk || (input.processing.droppedFrames / Math.max(1, input.processing.processedFrames + input.processing.droppedFrames)) >= input.thresholds.reviewDroppedFrameRatio) return "review";
+  if (validRatio < input.thresholds.passValidRatio || input.tracks.some(track => track.state === "provisional") || confidence < input.thresholds.passConfidenceP50 || input.points.some(point => point.grade === "review") || input.recoveryCount > 0 || input.rejectedRegistrations > 0 || input.errorRisk || (input.processing.droppedFrames / Math.max(1, input.processing.processedFrames + input.processing.droppedFrames)) >= input.thresholds.reviewDroppedFrameRatio) return "review";
   return "pass";
+}
+
+function metricSummary(values: Array<number | null | undefined>) {
+  const finite = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  return {
+    count: finite.length,
+    p50: percentile(finite, .5),
+    p95: percentile(finite, .95),
+    max: finite.length ? Math.max(...finite) : null
+  };
+}
+
+function calibratedPoint(point: { x: number; y: number }, calibration: CalibrationScale) {
+  const ySign = calibration.yAxisDirection === "up" ? -1 : 1;
+  return {
+    x: calibration.engineeringOrigin.x + (point.x - calibration.pixelOrigin.x) * calibration.xUnitsPerPixel,
+    y: calibration.engineeringOrigin.y + (point.y - calibration.pixelOrigin.y) * calibration.yUnitsPerPixel * ySign
+  };
+}
+
+function groundTruthErrors(
+  tracks: ReportTrack[],
+  observations: GroundTruthObservation[],
+  calibration: CalibrationScale | null
+): ReportModelResult["groundTruthErrors"] {
+  const tracksByKey = new Map(tracks.map(track => [`${track.pointId}:${track.frame}`, track]));
+  const rows = observations.flatMap(observation => {
+    const track = tracksByKey.get(`${observation.pointId}:${observation.frame}`);
+    if (!track || track.state === "lost" || track.state === "paused") return [];
+    const measured = observation.unit === "px"
+      ? track.refined
+      : calibration && observation.unit === calibration.unit
+        ? calibratedPoint(track.refined, calibration)
+        : undefined;
+    if (!measured) return [];
+    return [{
+      pointId: observation.pointId,
+      unit: observation.unit,
+      errorX: measured.x - observation.x,
+      errorY: measured.y - observation.y
+    }];
+  });
+  const groups = new Map<string, typeof rows>();
+  for (const row of rows) groups.set(`${row.pointId}:${row.unit}`, [...(groups.get(`${row.pointId}:${row.unit}`) ?? []), row]);
+  return [...groups.values()].map(group => {
+    const ex = group.map(row => row.errorX);
+    const ey = group.map(row => row.errorY);
+    const radial = group.map(row => Math.hypot(row.errorX, row.errorY)).sort((a, b) => a - b);
+    const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
+    return {
+      pointId: group[0].pointId,
+      unit: group[0].unit,
+      count: group.length,
+      biasX: rounded(mean(ex)),
+      biasY: rounded(mean(ey)),
+      maeX: rounded(mean(ex.map(Math.abs))),
+      maeY: rounded(mean(ey.map(Math.abs))),
+      rmseX: rounded(Math.sqrt(mean(ex.map(value => value ** 2)))),
+      rmseY: rounded(Math.sqrt(mean(ey.map(value => value ** 2)))),
+      radialP95: percentile(radial, .95) ?? 0,
+      radialMax: rounded(Math.max(...radial))
+    };
+  }).sort((left, right) => left.pointId.localeCompare(right.pointId));
 }
 
 export function buildReportModel(snapshot: ReportSnapshot, metadata: ReportMetadata, thresholdOverrides?: Partial<QualityThresholds>, optionOverrides?: Partial<ReportOptions>): ReportModelResult {
@@ -216,9 +297,10 @@ export function buildReportModel(snapshot: ReportSnapshot, metadata: ReportMetad
   const reprojections = registrations.filter(registration => registration.reprojectionErrorSemantics !== "not-available").map(registration => registration.medianReprojectionError).filter(Number.isFinite);
   const registration = {
     count: registrations.length,
-    acceptedCount: registrations.filter(registration => registration.accepted === true).length,
-    rejectedCount: registrations.filter(registration => registration.accepted === false).length,
-    successRate: registrations.length ? registrations.filter(registration => registration.accepted === true).length / registrations.length : 0,
+    acceptedCount: registrations.filter(item => (item.decision ?? (item.accepted ? "accepted" : "rejected")) === "accepted").length,
+    provisionalCount: registrations.filter(item => item.decision === "provisional").length,
+    rejectedCount: registrations.filter(item => (item.decision ?? (item.accepted ? "accepted" : "rejected")) === "rejected").length,
+    successRate: registrations.length ? registrations.filter(item => (item.decision ?? (item.accepted ? "accepted" : "rejected")) === "accepted").length / registrations.length : 0,
     meanInlierRatio: inlierRatios.length ? rounded(inlierRatios.reduce((sum, value) => sum + value, 0) / inlierRatios.length) : null,
     medianInlierRatio: percentile(inlierRatios, .5),
     meanReprojectionError: reprojections.length ? rounded(reprojections.reduce((sum, value) => sum + value, 0) / reprojections.length) : null,
@@ -251,9 +333,31 @@ export function buildReportModel(snapshot: ReportSnapshot, metadata: ReportMetad
   const chartSeries = pointIds.map(pointId => ({ pointId, samples: sampleChartRows(tracks.filter(track => track.pointId === pointId)) }));
   const keyFrames = pointIds.flatMap(pointId => keyFramesFor(tracks.filter(track => track.pointId === pointId), options.keyFrameCount)).sort((a, b) => a.pointId.localeCompare(b.pointId) || a.frame - b.frame);
   const grade = overallGrade({ points: pointReports, tracks, thresholds, processing, recoveryCount: snapshot.recoveryEvents.length, rejectedRegistrations: registration.rejectedCount, errorRisk: risks.some(risk => risk.severity === "error") });
+  const frameLedger = [...(snapshot.frameLedger ?? [])].sort((left, right) => left.inputIndex - right.inputIndex);
+  const calibration = snapshot.calibration ?? null;
+  const groundTruth = [...(snapshot.groundTruth ?? [])].sort((left, right) => left.pointId.localeCompare(right.pointId) || left.frame - right.frame);
+  const topology = buildFixedTopology(snapshot.seeds, snapshot.disabledTopologyEdgeIds);
+  const internalQuality = {
+    confidence: metricSummary(tracks.map(track => track.confidence)),
+    residualPx: metricSummary(tracks.map(track => track.residual)),
+    innovationPx: metricSummary(tracks.map(track => track.innovationPx)),
+    flowForwardBackwardPx: metricSummary(tracks.map(track => track.flowErrorForwardBackward)),
+    epipolarErrorPx: metricSummary(tracks.map(track => track.epipolarError)),
+    registrationSymmetricErrorPx: metricSummary(registrations.map(item => item.medianSymmetricTransferError))
+  };
   return {
+    schemaVersion: 3,
     metadata, thresholds, options, grade,
-    execution: { pointCount: pointIds.length, frameCount: frameSet.size, sampleCount: tracks.length, stateCounts, validRatio: tracks.length ? stateCounts.valid / tracks.length : 0, lostRatio: tracks.length ? (stateCounts.lost + stateCounts.paused) / tracks.length : 0, droppedFrameRatio, processingStats: processing },
+    execution: {
+      pointCount: pointIds.length, frameCount: frameSet.size, sampleCount: tracks.length,
+      inputFrameCount: frameLedger.length || frameSet.size,
+      processedFrameCount: frameLedger.length ? frameLedger.filter(entry => entry.processingStatus === "processed").length : frameSet.size,
+      isolatedFrameCount: frameLedger.filter(entry => entry.processingStatus === "isolated").length,
+      missingFrameCount: frameLedger.filter(entry => entry.decodeStatus === "failed" || entry.missingCount > 0).length,
+      stateCounts, validRatio: tracks.length ? stateCounts.valid / tracks.length : 0,
+      lostRatio: tracks.length ? (stateCounts.lost + stateCounts.paused) / tracks.length : 0,
+      droppedFrameRatio, processingStats: processing
+    },
     points: pointReports,
     tracks,
     registrations,
@@ -263,6 +367,12 @@ export function buildReportModel(snapshot: ReportSnapshot, metadata: ReportMetad
     anomalyIntervals: intervals,
     risks,
     humanInterventions,
-    keyFrames
+    keyFrames,
+    frameLedger,
+    topology,
+    calibration,
+    groundTruth,
+    internalQuality,
+    groundTruthErrors: groundTruthErrors(tracks, groundTruth, calibration)
   };
 }

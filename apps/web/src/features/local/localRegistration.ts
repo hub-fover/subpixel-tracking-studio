@@ -9,6 +9,61 @@ export type SceneRegistrationAnchor = {
 
 export type RegistrationGuidance = FrameRegistration & { sceneAnchors?: SceneRegistrationAnchor[] };
 
+type RegistrationQualityInput = {
+  matchCount: number;
+  inlierCount: number;
+  inlierRatio: number;
+  medianSymmetricTransferError: number | null;
+  inlierCoverage: number;
+  transformConsistencyError: number | null;
+  hasFiniteInvertibleTransform: boolean;
+  projectedFrameAccepted: boolean;
+};
+
+export function classifyRegistrationQuality(input: RegistrationQualityInput): Pick<FrameRegistration, "decision" | "usableForPrediction" | "failureClass" | "reason"> {
+  const hardReason = !input.hasFiniteInvertibleTransform
+    ? "registration.degenerate-transform"
+    : !input.projectedFrameAccepted
+      ? "registration.invalid-projected-frame"
+      : input.medianSymmetricTransferError === null || input.medianSymmetricTransferError > 3
+        ? "registration.high-residual"
+        : input.transformConsistencyError !== null && input.transformConsistencyError > 5
+          ? "registration.transform-inconsistent"
+          : null;
+  if (hardReason) return { decision: "rejected", usableForPrediction: false, failureClass: "hard-geometry", reason: hardReason };
+  const consistency = input.transformConsistencyError ?? 0;
+  const accepted = input.matchCount >= 50
+    && input.inlierRatio >= .35
+    && input.medianSymmetricTransferError! <= 3
+    && input.inlierCoverage >= .1
+    && consistency <= 5;
+  if (accepted) return { decision: "accepted", usableForPrediction: true, failureClass: "none", reason: null };
+  const provisional = input.matchCount >= 20
+    && input.inlierCount >= 12
+    && input.inlierRatio >= .5
+    && input.medianSymmetricTransferError! <= 2
+    && input.inlierCoverage >= .05
+    && consistency <= 3;
+  const reason = input.matchCount < 50
+    ? "registration.too-few-matches"
+    : input.inlierRatio < .35
+      ? "registration.low-inlier-ratio"
+      : input.inlierCoverage < .1
+        ? "registration.low-coverage"
+        : "registration.quality-gate-failed";
+  return provisional
+    ? { decision: "provisional", usableForPrediction: true, failureClass: "soft-quality", reason }
+    : { decision: "rejected", usableForPrediction: false, failureClass: "soft-quality", reason };
+}
+
+function registrationDecision(registration: FrameRegistration): NonNullable<FrameRegistration["decision"]> {
+  return registration.decision ?? (registration.accepted === true ? "accepted" : "rejected");
+}
+
+function registrationUsable(registration: FrameRegistration): boolean {
+  return registration.usableForPrediction ?? registration.accepted === true;
+}
+
 type OpenCvLike = {
   Mat: new (...args: any[]) => any;
   KeyPointVector: new () => any;
@@ -75,9 +130,9 @@ export function composeRegistrationTransforms(sourceToMiddle: number[], middleTo
 }
 
 export function composeRegistrationGuidance(chain: RegistrationGuidance | undefined, adjacent: RegistrationGuidance): RegistrationGuidance | undefined {
-  if (!adjacent.accepted || !adjacent.transform?.matrix || adjacent.sourceFrame === undefined || adjacent.targetFrame === undefined) return undefined;
-  if (!chain) return { ...adjacent, method: "adjacent-flow" };
-  if (!chain.accepted || !chain.transform?.matrix || chain.targetFrame !== adjacent.sourceFrame || chain.sourceFrame === undefined) return undefined;
+  if (!registrationUsable(adjacent) || !adjacent.transform?.matrix || adjacent.sourceFrame === undefined || adjacent.targetFrame === undefined) return undefined;
+  if (!chain) return { ...adjacent, method: "adjacent-flow", guidanceSource: "adjacent" };
+  if (!registrationUsable(chain) || !chain.transform?.matrix || chain.targetFrame !== adjacent.sourceFrame || chain.sourceFrame === undefined) return undefined;
   const matrix = composeRegistrationTransforms(chain.transform.matrix, adjacent.transform.matrix);
   const inverse = matrix ? invertMatrix(matrix) : undefined;
   if (!matrix || !inverse) return undefined;
@@ -94,7 +149,11 @@ export function composeRegistrationGuidance(chain: RegistrationGuidance | undefi
     inlierCoverage: Math.min(chain.inlierCoverage ?? 0, adjacent.inlierCoverage ?? 0),
     medianSymmetricTransferError: Math.max(chain.medianSymmetricTransferError ?? 0, adjacent.medianSymmetricTransferError ?? 0),
     transformConsistencyError: null,
-    accepted: true,
+    decision: registrationDecision(chain) === "accepted" && registrationDecision(adjacent) === "accepted" ? "accepted" : "provisional",
+    usableForPrediction: true,
+    failureClass: registrationDecision(chain) === "accepted" && registrationDecision(adjacent) === "accepted" ? "none" : "soft-quality",
+    guidanceSource: "composed",
+    accepted: registrationDecision(chain) === "accepted" && registrationDecision(adjacent) === "accepted",
     reason: null,
     transform: { kind: "affine", matrix },
     inverseTransform: { kind: "affine", matrix: inverse }
@@ -106,9 +165,9 @@ function distributedProbePoints(size: { width: number; height: number }) {
 }
 
 export function reconcileRegistrationGuidance(direct: RegistrationGuidance, composed: RegistrationGuidance | undefined, size: { width: number; height: number }): RegistrationGuidance {
-  if (!direct.accepted || !direct.transform?.matrix || !composed?.accepted || !composed.transform?.matrix) return direct;
+  if (!registrationUsable(direct) || !direct.transform?.matrix || !composed || !registrationUsable(composed) || !composed.transform?.matrix) return direct;
   if (direct.sourceFrame !== composed.sourceFrame || direct.targetFrame !== composed.targetFrame) {
-    return { ...direct, accepted: false, transformConsistencyError: Infinity, reason: "registration.frame-mismatch" };
+    return { ...direct, decision: "rejected", usableForPrediction: false, failureClass: "hard-geometry", accepted: false, transformConsistencyError: Infinity, reason: "registration.frame-mismatch" };
   }
   const errors = distributedProbePoints(size).map(point => {
     const directPoint = project(direct.transform!.matrix, point);
@@ -117,8 +176,8 @@ export function reconcileRegistrationGuidance(direct: RegistrationGuidance, comp
   }).sort((left, right) => left - right);
   const transformConsistencyError = errors[Math.floor(errors.length / 2)] ?? Infinity;
   return transformConsistencyError <= 5
-    ? { ...direct, transformConsistencyError }
-    : { ...direct, accepted: false, transformConsistencyError, reason: "registration.transform-inconsistent" };
+    ? { ...direct, transformConsistencyError, guidanceSource: "direct" }
+    : { ...direct, decision: "rejected", usableForPrediction: false, failureClass: "hard-geometry", accepted: false, transformConsistencyError, reason: "registration.transform-inconsistent" };
 }
 
 export function validateProjectedFrame(matrix: number[], size: { width: number; height: number }) {
@@ -202,10 +261,10 @@ function cvRegistration(reference: GrayPatch, current: GrayPatch, frame: number,
       const sourcePoint = refKeypoints.get(best.queryIdx).pt; const destinationPoint = curKeypoints.get(best.trainIdx).pt;
       source.push(sourcePoint.x, sourcePoint.y); destination.push(destinationPoint.x, destinationPoint.y);
     }
-    if (source.length < 8) return { frame, sourceFrame, targetFrame: frame, method, matchCount: source.length / 2, inlierCount: 0, inlierRatio: 0, medianReprojectionError: Infinity, inlierCoverage: 0, medianSymmetricTransferError: null, accepted: false, reason: "registration.too-few-matches" };
+    if (source.length < 8) return { frame, sourceFrame, targetFrame: frame, method, matchCount: source.length / 2, inlierCount: 0, inlierRatio: 0, medianReprojectionError: Infinity, inlierCoverage: 0, medianSymmetricTransferError: null, decision: "rejected", usableForPrediction: false, failureClass: "hard-geometry", guidanceSource: "direct", accepted: false, reason: "registration.too-few-matches" };
     src = cv.matFromArray!(source.length / 2, 1, cv.CV_32FC2, source); dst = cv.matFromArray!(destination.length / 2, 1, cv.CV_32FC2, destination); mask = new cv.Mat();
     homography = cv.findHomography!(src, dst, cv.RANSAC, 3, mask);
-    if (!homography || homography.empty?.()) return { frame, sourceFrame, targetFrame: frame, method, matchCount: source.length / 2, inlierCount: 0, inlierRatio: 0, medianReprojectionError: Infinity, inlierCoverage: 0, medianSymmetricTransferError: null, accepted: false, reason: "registration.no-homography" };
+    if (!homography || homography.empty?.()) return { frame, sourceFrame, targetFrame: frame, method, matchCount: source.length / 2, inlierCount: 0, inlierRatio: 0, medianReprojectionError: Infinity, inlierCoverage: 0, medianSymmetricTransferError: null, decision: "rejected", usableForPrediction: false, failureClass: "hard-geometry", guidanceSource: "direct", accepted: false, reason: "registration.no-homography" };
     const matrix = Array.from(homography.data64F ?? homography.data32F ?? []).slice(0, 9).map(Number);
     const inverse = invertMatrix(matrix); const errors: number[] = []; const symmetricErrors: number[] = []; const anchors: SceneRegistrationAnchor[] = []; let inlierCount = 0;
     for (let index = 0; index < source.length / 2; index += 1) {
@@ -230,9 +289,22 @@ function cvRegistration(reference: GrayPatch, current: GrayPatch, frame: number,
     }
     const fundamentalMatrix = fundamental && !fundamental.empty?.() ? Array.from(fundamental.data64F ?? fundamental.data32F ?? []).slice(0, 9).map(Number) : undefined;
     const projectedFrame = validateProjectedFrame(matrix, { width: reference.width, height: reference.height });
-    const accepted = matchCount >= 50 && inlierRatio >= .35 && median <= 3 && symmetricMedian <= 3 && coverage >= .1 && matrix.length === 9 && Boolean(inverse) && projectedFrame.accepted;
-    const reason = accepted ? null : matchCount < 50 ? "registration.too-few-matches" : inlierRatio < .35 ? "registration.low-inlier-ratio" : coverage < .1 ? "registration.low-coverage" : !inverse ? "registration.degenerate-transform" : !projectedFrame.accepted ? projectedFrame.reason : "registration.high-residual";
-    return { frame, sourceFrame, targetFrame: frame, method, matchCount, inlierCount, inlierRatio, medianReprojectionError: median, reprojectionErrorSemantics: "pixel-reprojection", inlierCoverage: coverage, medianSymmetricTransferError: symmetricMedian, transformConsistencyError: null, accepted, reason, transform: accepted ? { kind: "homography", matrix } : undefined, inverseTransform: accepted && inverse ? { kind: "homography", matrix: inverse } : undefined, fundamentalMatrix, sceneAnchors: accepted ? distributedAnchors(anchors, reference.width, reference.height) : undefined };
+    const quality = classifyRegistrationQuality({
+      matchCount, inlierCount, inlierRatio, medianSymmetricTransferError: symmetricMedian,
+      inlierCoverage: coverage, transformConsistencyError: null,
+      hasFiniteInvertibleTransform: matrix.length === 9 && matrix.every(Number.isFinite) && Boolean(inverse),
+      projectedFrameAccepted: projectedFrame.accepted
+    });
+    return {
+      frame, sourceFrame, targetFrame: frame, method, matchCount, inlierCount, inlierRatio,
+      medianReprojectionError: median, reprojectionErrorSemantics: "pixel-reprojection",
+      inlierCoverage: coverage, medianSymmetricTransferError: symmetricMedian, transformConsistencyError: null,
+      ...quality, guidanceSource: "direct", accepted: quality.decision === "accepted",
+      transform: quality.usableForPrediction ? { kind: "homography", matrix } : undefined,
+      inverseTransform: quality.usableForPrediction && inverse ? { kind: "homography", matrix: inverse } : undefined,
+      fundamentalMatrix,
+      sceneAnchors: quality.usableForPrediction ? distributedAnchors(anchors, reference.width, reference.height) : undefined
+    };
   } catch {
     return null;
   } finally {
@@ -262,7 +334,8 @@ function scoreTranslation(reference: GrayPatch, current: GrayPatch, dx: number, 
 
 export function registerLocalPatches(reference: GrayPatch, current: GrayPatch, frame: number, sourceFrame = 0): RegistrationGuidance {
   if (reference.width !== current.width || reference.height !== current.height) return {
-    frame, sourceFrame, targetFrame: frame, method: "none", matchCount: 0, inlierCount: 0, inlierRatio: 0, medianReprojectionError: Infinity, accepted: false, reason: "registration.dimension-mismatch"
+    frame, sourceFrame, targetFrame: frame, method: "none", matchCount: 0, inlierCount: 0, inlierRatio: 0, medianReprojectionError: Infinity,
+    decision: "rejected", usableForPrediction: false, failureClass: "hard-geometry", guidanceSource: "direct", accepted: false, reason: "registration.dimension-mismatch"
   };
   const cvResult = cvRegistration(reference, current, frame, sourceFrame);
   if (cvResult) return cvResult;
@@ -289,7 +362,7 @@ export function registerLocalPatches(reference: GrayPatch, current: GrayPatch, f
     if (result.score > best.score) best = { ...result, dx, dy };
   }
   const smallMotion = Math.hypot(best.dx, best.dy) <= 16;
-  const accepted = best.count >= 50 && best.score >= .35 && best.residual <= 12 && smallMotion;
+  const usable = best.count >= 50 && best.score >= .35 && best.residual <= 12 && smallMotion;
   return {
     frame,
     sourceFrame,
@@ -302,10 +375,14 @@ export function registerLocalPatches(reference: GrayPatch, current: GrayPatch, f
     reprojectionErrorSemantics: "not-available",
     inlierCoverage: 0,
     medianSymmetricTransferError: null,
-    accepted,
-    reason: accepted ? null : !smallMotion ? "registration.degraded-large-motion" : best.count < 50 ? "registration.too-few-matches" : best.score < .35 ? "registration.low-inlier-ratio" : "registration.high-residual",
-    transform: accepted ? { kind: "affine", matrix: [1, 0, best.dx, 0, 1, best.dy, 0, 0, 1] } : undefined,
-    inverseTransform: accepted ? { kind: "affine", matrix: [1, 0, -best.dx, 0, 1, -best.dy, 0, 0, 1] } : undefined
+    decision: usable ? "provisional" : "rejected",
+    usableForPrediction: usable,
+    failureClass: "engine-unavailable",
+    guidanceSource: "translation",
+    accepted: false,
+    reason: usable ? "registration.translation-fallback" : !smallMotion ? "registration.degraded-large-motion" : best.count < 50 ? "registration.too-few-matches" : best.score < .35 ? "registration.low-inlier-ratio" : "registration.high-residual",
+    transform: usable ? { kind: "affine", matrix: [1, 0, best.dx, 0, 1, best.dy, 0, 0, 1] } : undefined,
+    inverseTransform: usable ? { kind: "affine", matrix: [1, 0, -best.dx, 0, 1, -best.dy, 0, 0, 1] } : undefined
   };
 }
 
@@ -330,7 +407,7 @@ function patchCorrelation(reference: GrayPatch, current: GrayPatch, centerX: num
 export function registerAdjacentAnchors(anchors: SceneRegistrationAnchor[], size: { width: number; height: number }, targetFrame: number, sourceFrame = targetFrame - 1): RegistrationGuidance {
   const fit = applyLocalAffine({ x: 0, y: 0 }, anchors.map(anchor => ({ reference: anchor.reference, current: anchor.current, reliable: true })));
   const affine = fit.matrix;
-  if (!affine) return { frame: targetFrame, sourceFrame, targetFrame, method: "adjacent-flow", matchCount: anchors.length, inlierCount: 0, inlierRatio: 0, medianReprojectionError: Infinity, accepted: false, reason: "registration.adjacent-flow-degenerate" };
+  if (!affine) return { frame: targetFrame, sourceFrame, targetFrame, method: "adjacent-flow", matchCount: anchors.length, inlierCount: 0, inlierRatio: 0, medianReprojectionError: Infinity, decision: "rejected", usableForPrediction: false, failureClass: "hard-geometry", guidanceSource: "adjacent", accepted: false, reason: "registration.adjacent-flow-degenerate" };
   const residuals = anchors.map(anchor => Math.hypot(affine[0] * anchor.reference.x + affine[1] * anchor.reference.y + affine[2] - anchor.current.x, affine[3] * anchor.reference.x + affine[4] * anchor.reference.y + affine[5] - anchor.current.y));
   const inlierAnchors = anchors.filter((_, index) => residuals[index] <= 1.5);
   const refined = applyLocalAffine({ x: 0, y: 0 }, inlierAnchors.map(anchor => ({ reference: anchor.reference, current: anchor.current, reliable: true })));
@@ -340,19 +417,23 @@ export function registerAdjacentAnchors(anchors: SceneRegistrationAnchor[], size
   const matchCount = anchors.length; const inlierCount = inlierAnchors.length; const inlierRatio = inlierCount / Math.max(1, matchCount);
   const matrix = [finalAffine[0], finalAffine[1], finalAffine[2], finalAffine[3], finalAffine[4], finalAffine[5], 0, 0, 1];
   const inverse = invertMatrix(matrix); const coverage = convexHullCoverage(inlierAnchors.map(anchor => anchor.reference), size.width, size.height);
-  const accepted = matchCount >= 50 && inlierRatio >= .7 && median <= 1.5 && coverage >= .1 && Boolean(inverse);
+  const quality = classifyRegistrationQuality({
+    matchCount, inlierCount, inlierRatio, medianSymmetricTransferError: median,
+    inlierCoverage: coverage, transformConsistencyError: null,
+    hasFiniteInvertibleTransform: Boolean(inverse), projectedFrameAccepted: validateProjectedFrame(matrix, size).accepted
+  });
   return {
     frame: targetFrame, sourceFrame, targetFrame, method: "adjacent-flow", matchCount, inlierCount, inlierRatio,
     medianReprojectionError: median, reprojectionErrorSemantics: "pixel-reprojection", inlierCoverage: coverage, medianSymmetricTransferError: median,
-    accepted, reason: accepted ? null : matchCount < 50 ? "registration.too-few-matches" : inlierRatio < .7 ? "registration.low-inlier-ratio" : coverage < .1 ? "registration.low-coverage" : "registration.adjacent-flow-degenerate",
-    transform: accepted ? { kind: "affine", matrix } : undefined,
-    inverseTransform: accepted && inverse ? { kind: "affine", matrix: inverse } : undefined,
-    sceneAnchors: accepted ? distributedAnchors(inlierAnchors.map(anchor => ({ ...anchor, residualPx: Math.hypot(finalAffine[0] * anchor.reference.x + finalAffine[1] * anchor.reference.y + finalAffine[2] - anchor.current.x, finalAffine[3] * anchor.reference.x + finalAffine[4] * anchor.reference.y + finalAffine[5] - anchor.current.y) })), size.width, size.height) : undefined
+    ...quality, guidanceSource: "adjacent", accepted: quality.decision === "accepted",
+    transform: quality.usableForPrediction ? { kind: "affine", matrix } : undefined,
+    inverseTransform: quality.usableForPrediction && inverse ? { kind: "affine", matrix: inverse } : undefined,
+    sceneAnchors: quality.usableForPrediction ? distributedAnchors(inlierAnchors.map(anchor => ({ ...anchor, residualPx: Math.hypot(finalAffine[0] * anchor.reference.x + finalAffine[1] * anchor.reference.y + finalAffine[2] - anchor.current.x, finalAffine[3] * anchor.reference.x + finalAffine[4] * anchor.reference.y + finalAffine[5] - anchor.current.y) })), size.width, size.height) : undefined
   };
 }
 
 export function registerAdjacentPatches(reference: GrayPatch, current: GrayPatch, targetFrame: number, sourceFrame = targetFrame - 1): RegistrationGuidance {
-  if (reference.width !== current.width || reference.height !== current.height) return { frame: targetFrame, sourceFrame, targetFrame, method: "adjacent-flow", matchCount: 0, inlierCount: 0, inlierRatio: 0, medianReprojectionError: Infinity, accepted: false, reason: "registration.dimension-mismatch" };
+  if (reference.width !== current.width || reference.height !== current.height) return { frame: targetFrame, sourceFrame, targetFrame, method: "adjacent-flow", matchCount: 0, inlierCount: 0, inlierRatio: 0, medianReprojectionError: Infinity, decision: "rejected", usableForPrediction: false, failureClass: "hard-geometry", guidanceSource: "adjacent", accepted: false, reason: "registration.dimension-mismatch" };
   const radius = 2;
   const motion = Math.max(2, Math.min(12, Math.floor(Math.min(reference.width, reference.height) / 8)));
   const margin = radius + motion + 1;

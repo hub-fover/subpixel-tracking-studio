@@ -1,5 +1,5 @@
 import { AlertTriangle, Camera, Check, Download, FileImage, FlipHorizontal2, Pause, Play, Redo2, ScanSearch, Trash2, Undo2, Video, FileText } from "lucide-react";
-import type { AnchorCorrespondence, CameraSession, ExtractionIntent, FeatureDraft, MultiPointTrack, PointSeed, PointTrack, ProcessingStats, RiskNotice, TrackingEvent, Roi, QualityThresholds, ReportMetadata, ReportModel, ReportOptions } from "@subpixel/contracts";
+import type { AnchorCorrespondence, CameraSession, ExtractionIntent, FeatureDraft, FrameLedgerEntry, MultiPointTrack, PointSeed, PointTrack, ProcessingStats, RiskNotice, TrackingEvent, Roi, QualityThresholds, ReportMetadata, ReportModel, ReportOptions } from "@subpixel/contracts";
 import type { CameraFacingMode } from "../capture/cameraSource";
 import { RoiCanvas, type CanvasMode } from "../roi/RoiCanvas";
 import { EventTimeline } from "./EventTimeline";
@@ -20,6 +20,7 @@ type Props = {
   onOpenCamera: () => void; cameraActive: boolean; cameraSession: CameraSession; facingMode: CameraFacingMode; onSwitchCamera: () => void; recordingActive: boolean; onToggleRecording: () => void; recordingReady: boolean; onRefineRecording: () => void; riskNotices: RiskNotice[]; processingStats: ProcessingStats;
   degradedTrackingRequired: boolean; degradedTrackingConfirmed: boolean; onConfirmDegradedTracking: () => void;
   report?: ReportModel; reportOpen: boolean; onOpenReport: () => void; onCloseReport: () => void; onRefreshReport: (metadata: ReportMetadata, thresholds: QualityThresholds, options: ReportOptions) => void;
+  frameLedger: FrameLedgerEntry[];
 };
 
 const intents: [ExtractionIntent, string][] = [
@@ -31,8 +32,15 @@ export function TrackingWorkbench(props: Props) {
   const latestByPoint = new Map(props.multiTracks.map(track => [track.pointId, track]));
   const currentTracks = props.seeds.map(seed => latestByPoint.get(seed.pointId) ?? ({ pointId: seed.pointId, model: seed.model, predicted: seed.snapped, refined: seed.snapped, confidence: seed.candidateScore, state: "valid" as const, frame: 0, timestampMs: 0, residual: 0, flowErrorForwardBackward: null, ncc: null, descriptorDistance: null, epipolarError: null, predictionSource: "previous-position" as const, innovationPx: 0, localAffineResidualPx: null, gateFailures: [], candidateUniqueness: null, relocationMethod: "none" as const }));
   const latestRisk = props.riskNotices.slice(0, 4);
+  const processedInputs = props.frameLedger.filter(entry => entry.processingStatus === "processed" || entry.processingStatus === "isolated").length;
+  const frameTotals = props.frameLedger.reduce((total, entry) => ({
+    valid: total.valid + entry.validCount,
+    provisional: total.provisional + entry.provisionalCount,
+    missing: total.missing + entry.missingCount
+  }), { valid: 0, provisional: 0, missing: 0 });
   return <main className="app-shell">
     <header className="topbar"><div><span className="brand-mark"><ScanSearch size={18} /></span><strong>Subpixel Studio</strong><span className="version">原图 ROI 亚像素工作台</span></div><div className="header-status"><i />本地处理</div></header>
+    {props.frameLedger.length > 0 && <div className="frame-progress" role="status" data-testid="frame-progress"><strong>输入/已处理 {processedInputs}/{props.frameLedger.length}</strong><span>有效 {frameTotals.valid} · 待复核 {frameTotals.provisional} · 缺测 {frameTotals.missing}</span></div>}
     <div className="workspace">
       <button className="report-launcher" onClick={props.onOpenReport}><FileText size={16} />报告</button>
       <aside className="left-panel">

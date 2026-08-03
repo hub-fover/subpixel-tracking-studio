@@ -1,5 +1,6 @@
 import type { ReportManifest, ReportModel } from "@subpixel/contracts";
 import { fontBytesToBase64, loadReportPdfFont, validateTrueTypeFont, validateUnicodePdf } from "./reportPdfFont";
+import { renderEngineeringReportPdf, type EngineeringReportImages } from "./engineeringReportPdf";
 
 export { validateTrueTypeFont } from "./reportPdfFont";
 
@@ -56,6 +57,7 @@ function table(rows: Array<Record<string, unknown>>, columns: string[]): string 
 function pointRows(report: ReportModel) {
   return report.points.map(point => ({
     point_id: point.pointId,
+    group_id: point.groupId ?? "",
     model: point.model ?? "",
     grade: point.grade,
     final_state: point.finalState ?? "",
@@ -98,6 +100,10 @@ function trackRows(report: ReportModel) {
     local_affine_residual_px: track.localAffineResidualPx ?? "",
     gate_failures: JSON.stringify(track.gateFailures),
     candidate_uniqueness: track.candidateUniqueness ?? "",
+    registration_decision: track.registrationDecision ?? "",
+    point_gate_passed: track.pointGatePassed ?? "",
+    topology_error_px: track.topologyErrorPx ?? "",
+    missing_reason: track.missingReason ?? "",
     state: track.state,
     relocation_method: track.relocationMethod
   }));
@@ -108,6 +114,10 @@ function registrationRows(report: ReportModel) {
     frame: registration.frame,
     method: registration.method,
     accepted: registration.accepted ?? "",
+    decision: registration.decision ?? (registration.accepted === true ? "accepted" : registration.accepted === false ? "rejected" : ""),
+    usable_for_prediction: registration.usableForPrediction ?? "",
+    failure_class: registration.failureClass ?? "",
+    guidance_source: registration.guidanceSource ?? "",
     match_count: registration.matchCount,
     inlier_count: registration.inlierCount,
     inlier_ratio: registration.inlierRatio,
@@ -126,8 +136,8 @@ function registrationRows(report: ReportModel) {
   }));
 }
 
-const POINT_COLUMNS = ["point_id", "model", "grade", "final_state", "sample_count", "valid_ratio", "lost_ratio", "start_x_px", "start_y_px", "end_x_px", "end_y_px", "delta_x_px", "delta_y_px", "confidence_p50", "confidence_p95", "gating_failures", "relocation_methods"];
-const TRACK_COLUMNS = ["point_id", "frame", "timestamp_ms", "predicted_x_px", "predicted_y_px", "x_px", "y_px", "model", "residual", "residual_semantics", "confidence", "lowe_ratio", "flow_fb_error", "ncc", "descriptor_distance", "epipolar_error", "state", "relocation_method", "prediction_source", "innovation_px", "local_affine_residual_px", "gate_failures", "candidate_uniqueness"];
+const POINT_COLUMNS = ["point_id", "group_id", "model", "grade", "final_state", "sample_count", "valid_ratio", "lost_ratio", "start_x_px", "start_y_px", "end_x_px", "end_y_px", "delta_x_px", "delta_y_px", "confidence_p50", "confidence_p95", "gating_failures", "relocation_methods"];
+const TRACK_COLUMNS = ["point_id", "frame", "timestamp_ms", "predicted_x_px", "predicted_y_px", "x_px", "y_px", "model", "residual", "residual_semantics", "confidence", "lowe_ratio", "flow_fb_error", "ncc", "descriptor_distance", "epipolar_error", "state", "relocation_method", "prediction_source", "innovation_px", "local_affine_residual_px", "gate_failures", "candidate_uniqueness", "registration_decision", "point_gate_passed", "topology_error_px", "missing_reason"];
 
 export function buildReportCsvFiles(report: ReportModel): Record<string, string> {
   const points = pointRows(report);
@@ -135,7 +145,11 @@ export function buildReportCsvFiles(report: ReportModel): Record<string, string>
   return {
     "points.csv": table(points, POINT_COLUMNS),
     "tracks.csv": table(tracks, TRACK_COLUMNS),
-    "registrations.csv": table(registrationRows(report), ["frame", "method", "accepted", "match_count", "inlier_count", "inlier_ratio", "median_reprojection_error_px", "reprojection_error_semantics", "p95_latency_ms", "source_frame", "target_frame", "inlier_coverage", "median_symmetric_transfer_error_px", "transform_consistency_error_px", "transform_kind", "transform_matrix", "inverse_transform_matrix", "reason"]),
+    "frame-ledger.csv": table(report.frameLedger.map(entry => ({ ...entry })), ["inputIndex", "frame", "sourceName", "timestampMs", "decodeStatus", "processingStatus", "validCount", "provisionalCount", "suspectCount", "missingCount", "keyframe", "registrationDecision", "failureReason"]),
+    "topology.csv": table(report.topology.map(edge => ({ ...edge })), ["edgeId", "groupId", "sourcePointId", "targetPointId", "referenceLengthPx", "enabled"]),
+    "registrations.csv": table(registrationRows(report), ["frame", "method", "accepted", "decision", "usable_for_prediction", "failure_class", "guidance_source", "match_count", "inlier_count", "inlier_ratio", "median_reprojection_error_px", "reprojection_error_semantics", "p95_latency_ms", "source_frame", "target_frame", "inlier_coverage", "median_symmetric_transfer_error_px", "transform_consistency_error_px", "transform_kind", "transform_matrix", "inverse_transform_matrix", "reason"]),
+    "internal-errors.csv": table(Object.entries(report.internalQuality).map(([metric, summary]) => ({ metric, ...summary })), ["metric", "count", "p50", "p95", "max"]),
+    "ground-truth-errors.csv": table(report.groundTruthErrors.map(error => ({ ...error })), ["pointId", "unit", "count", "biasX", "biasY", "maeX", "maeY", "rmseX", "rmseY", "radialP95", "radialMax"]),
     "events.csv": table([...report.events.map(event => ({ ...event })), ...report.humanInterventions], ["kind", "frame", "pointId", "message", "anchorCount", "coverage", "inlierRatio"]),
     "risks.csv": table(report.risks.map(risk => ({ ...risk })), ["id", "code", "severity", "frame", "pointId", "message", "action", "recoverable"])
   };
@@ -182,16 +196,16 @@ export async function buildReportManifest(report: ReportModel, assets: ReportAss
     return { kind: asset.kind, path: asset.path, status: "generated" as const, bytes: data.byteLength, sha256: await sha256(data) };
   }));
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     reportId: report.metadata.reportId,
     jobId: report.metadata.reportId,
-    algorithmVersion: "report-model-v2",
+    algorithmVersion: "report-model-v3",
     source: { kind: reportSourceKind(report.metadata.sourceFile), name: report.metadata.sourceFile },
     grade: report.grade,
     thresholds: report.thresholds,
-    summary: { points: report.execution.pointCount, frames: report.execution.frameCount, tracks: report.execution.sampleCount, validRatio: report.execution.validRatio, lostRatio: report.execution.lostRatio },
+    summary: { points: report.execution.pointCount, frames: report.execution.frameCount, inputFrames: report.execution.inputFrameCount, processedFrames: report.execution.processedFrameCount, provisionalSamples: report.execution.stateCounts.provisional, missingFrames: report.execution.missingFrameCount, tracks: report.execution.sampleCount, validRatio: report.execution.validRatio, lostRatio: report.execution.lostRatio },
     assets: manifestAssets,
-    parameters: { options: report.options },
+    parameters: { options: report.options, calibration: report.calibration, topologyEdges: report.topology.length },
     engine: report.execution.processingStats.engine,
     ...(report.execution.processingStats.nativeWidth && report.execution.processingStats.nativeHeight ? { originalDimensions: { width: report.execution.processingStats.nativeWidth, height: report.execution.processingStats.nativeHeight } } : { originalDimensions: { width: 1, height: 1 } }),
     processingStats: report.execution.processingStats,
@@ -210,22 +224,28 @@ export async function buildReportXlsx(report: ReportModel, options?: ReportBuild
   const add = (name: string, rows: Array<Record<string, unknown>>) => {
     const sheet = XLSX.utils.json_to_sheet(rows.length ? rows : [{ note: "无数据" }]);
     sheet["!freeze"] = { xSplit: 0, ySplit: 1 };
+    const range = XLSX.utils.decode_range(sheet["!ref"] ?? "A1:A1");
+    sheet["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(0, range.e.r), c: range.e.c } }) };
+    sheet["!cols"] = Array.from({ length: range.e.c + 1 }, (_, column) => ({ wch: Math.min(42, Math.max(11, ...Object.keys(rows[0] ?? { note: "" }).map((_, index) => index === column ? 16 : 0))) }));
     XLSX.utils.book_append_sheet(workbook, sheet, name);
   };
-  add("说明", [{ report_id: report.metadata.reportId, grade: report.grade, note: "质量等级仅代表算法门控结果，不构成计量检定结论。" }]);
-  add("摘要", [{ ...report.execution, grade: report.grade }]);
+  add("文控", [{ report_number: report.metadata.reportNumber, report_id: report.metadata.reportId, version: "V1.0", project: report.metadata.projectName, test_id: report.metadata.testId, prepared_by: report.metadata.operator, reviewed_by: "", approved_by: "", generated_at: report.metadata.generatedAt, build_commit: report.metadata.buildCommit, note: "质量等级仅代表算法门控结果，不构成计量检定结论。" }]);
+  add("帧台账", report.frameLedger.map(entry => ({ ...entry })));
   add("点", pointRows(report));
   add("轨迹", trackRows(report));
+  add("拓扑", report.topology.map(edge => ({ ...edge })));
   add("配准", registrationRows(report));
+  add("内部误差", Object.entries(report.internalQuality).map(([metric, summary]) => ({ metric, ...summary })));
+  add("真值误差", report.groundTruthErrors.map(error => ({ ...error })));
   add("事件", [...report.events.map(event => ({ ...event })), ...report.humanInterventions]);
   add("风险", report.risks.map(risk => ({ ...risk })));
-  add("参数", [{ ...report.thresholds, ...report.options }]);
+  add("参数", [{ ...report.thresholds, ...report.options, calibration: report.calibration ? JSON.stringify(report.calibration) : "未标定", schema_version: report.schemaVersion, grade: report.grade, ...report.execution }]);
   checkCancelled(options?.signal);
   const data = XLSX.write(workbook, { type: "array", bookType: "xlsx" });
   return new Blob([data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 }
 
-export async function buildReportPdf(report: ReportModel, annotatedImage?: string, options?: ReportBuildOptions): Promise<Blob> {
+export async function buildReportPdf(report: ReportModel, annotatedImage?: string | EngineeringReportImages, options?: ReportBuildOptions): Promise<Blob> {
   checkCancelled(options?.signal);
   const font = await loadReportPdfFont(options?.signal);
   const { jsPDF } = await import("jspdf");
@@ -233,52 +253,19 @@ export async function buildReportPdf(report: ReportModel, annotatedImage?: strin
   doc.addFileToVFS("NotoSansSC-Variable.ttf", fontBytesToBase64(font));
   doc.addFont("NotoSansSC-Variable.ttf", "NotoSansSC", "normal");
   doc.setFont("NotoSansSC");
-  const title = "亚像素特征提取与跟踪报告";
-  const write = (value: string, x: number, y: number, size = 10) => { doc.setFontSize(size); doc.text(value, x, y); };
-  const writeWrapped = (value: string, x: number, y: number, width: number, size = 10) => {
-    doc.setFontSize(size);
-    const lines = doc.splitTextToSize(value, width) as string[];
-    doc.text(lines, x, y);
-    return y + Math.max(1, lines.length) * (size + 3);
-  };
-  write(title, 42, 52, 18);
-  write(`报告编号: ${report.metadata.reportNumber}`, 42, 74);
-  write(`项目: ${report.metadata.projectName || "未填写"}    试验: ${report.metadata.testId || "未填写"}`, 42, 92);
-  write(`操作人: ${report.metadata.operator || "未填写"}    生成时间: ${report.metadata.generatedAt}`, 42, 110, 9);
-  write(`质量结论: ${report.grade}    点数: ${report.execution.pointCount}    帧数: ${report.execution.frameCount}`, 42, 128);
-  let coverY = writeWrapped(`备注: ${report.metadata.notes || "无"}`, 42, 146, 510, 9);
-  coverY = writeWrapped("说明：质量等级仅代表算法门控结果；无标定和计量溯源时不构成计量检定结论。", 42, coverY + 3, 510, 9);
-  let y = coverY + 12;
-  if (annotatedImage) {
-    const image = doc.getImageProperties(annotatedImage);
-    const scale = Math.min(510 / image.width, 285 / image.height);
-    const width = image.width * scale; const height = image.height * scale;
-    if (y + height > 760) { doc.addPage(); y = 52; }
-    const format = annotatedImage.startsWith("data:image/jpeg") ? "JPEG" : "PNG";
-    doc.addImage(annotatedImage, format, 42 + (510 - width) / 2, y, width, height);
-    y += height + 28;
-  }
-  if (y > 760) { doc.addPage(); y = 52; }
-  write("执行摘要", 42, y, 14); y += 22;
-  write(`有效率 ${(report.execution.validRatio * 100).toFixed(2)}%    失锁率 ${(report.execution.lostRatio * 100).toFixed(2)}%    P95 延迟 ${report.execution.processingStats.p95LatencyMs.toFixed(2)} ms`, 42, y); y += 30;
-  write("逐点质量", 42, y, 14); y += 18;
-  for (const point of report.points.slice(0, 28)) {
-    write(`${point.pointId}  ${point.model ?? "-"}  ${point.grade}  样本 ${point.sampleCount}  置信度P50 ${point.confidence.p50?.toFixed(3) ?? "-"}`, 48, y, 9); y += 14;
-    if (y > 760) { doc.addPage(); y = 52; }
-  }
-  doc.addPage(); y = 52; write("配准、风险与人工干预", 42, y, 14); y += 22;
-  write(`配准次数 ${report.registration.count}    成功率 ${(report.registration.successRate * 100).toFixed(2)}%    中位内点率 ${report.registration.medianInlierRatio?.toFixed(3) ?? "-"}`, 42, y, 10); y += 22;
-  for (const risk of report.risks.slice(0, 35)) { write(`风险 frame ${risk.frame}: ${risk.message}（动作：${risk.action}）`, 48, y, 9); y += 14; if (y > 760) { doc.addPage(); y = 52; } }
-  if (y > 700) { doc.addPage(); y = 52; }
-  write("方法、阈值与限制", 42, y + 20, 14);
-  write(`阈值：有效率 ${report.thresholds.passValidRatio}/${report.thresholds.reviewValidRatio}，置信度P50 ${report.thresholds.passConfidenceP50}/${report.thresholds.reviewConfidenceP50}，失锁率 ${report.thresholds.failLostRatio}。`, 42, y + 42, 9);
-  write("原始逐帧数据保存在 JSON/XLSX/CSV；图表仅做 min/max 保真采样。", 42, y + 58, 9);
+  const images = typeof annotatedImage === "string"
+    ? { reference: annotatedImage, current: annotatedImage }
+    : annotatedImage ?? {};
+  renderEngineeringReportPdf(doc, report, images, (index, total) => {
+    checkCancelled(options?.signal);
+    options?.onProgress?.({ phase: "pdf", completed: index + 1, total: Math.max(1, total), message: `生成逐点页面 ${index + 1}/${total}` });
+  });
   const output = new Uint8Array(doc.output("arraybuffer"));
   validateUnicodePdf(output);
   return new Blob([output], { type: "application/pdf" });
 }
 
-export async function buildReportBundle(report: ReportModel, assets: ReportAssetResult[] = [], annotatedImage?: string, options?: ReportBuildOptions): Promise<{ blob: Blob; manifest: ReportManifest }> {
+export async function buildReportBundle(report: ReportModel, assets: ReportAssetResult[] = [], annotatedImage?: string | EngineeringReportImages, options?: ReportBuildOptions): Promise<{ blob: Blob; manifest: ReportManifest }> {
   reportProgress(options, { phase: "preflight", completed: 0, total: 6, message: "检查报告资产" });
   const csvFiles = buildReportCsvFiles(report);
   checkCancelled(options?.signal);

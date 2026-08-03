@@ -61,7 +61,7 @@ describe("multi-point primitives", () => {
     expect(result.paused).toBe(true);
   });
 
-  it("pauses for an explicitly rejected registration even when summary metrics look acceptable", () => {
+  it("keeps successful point observations as provisional when registration only has a soft quality failure", () => {
     const seeds: PointSeed[] = Array.from({ length: 5 }, (_, index) => ({
       pointId: `p-${index}`,
       click: { x: index * 20, y: index * 15 },
@@ -76,10 +76,47 @@ describe("multi-point primitives", () => {
     const result = tracker.process(seeds.map(item => ({
       pointId: item.pointId,
       predicted: item.snapped,
-      refined: item.snapped,
+      refined: { x: item.snapped.x + .25, y: item.snapped.y - .1 },
+      confidence: .95,
+      residual: .08
+    })), 33, {
+      decision: "provisional",
+      failureClass: "soft-quality",
+      usableForPrediction: true,
+      matchCount: 62,
+      inlierRatio: .76,
+      medianReprojectionError: .42
+    });
+
+    expect(result.paused).toBe(false);
+    expect(result.tracks.every(track => track.state === "provisional")).toBe(true);
+    expect(result.tracks.every(track => track.pointGatePassed)).toBe(true);
+    const next = tracker.process([], 66, undefined, { pauseOnHardFailure: false, pauseOnInvalidRatio: false });
+    expect(next.tracks[0].predicted).toEqual(result.tracks[0].refined);
+  });
+
+  it("pauses for a hard rejected registration even when summary metrics look acceptable", () => {
+    const seeds: PointSeed[] = Array.from({ length: 5 }, (_, index) => ({
+      pointId: `p-${index}`,
+      click: { x: index * 20, y: index * 15 },
+      snapped: { x: index * 20, y: index * 15 },
+      roi: { x: index * 20, y: index * 15, width: 12, height: 12 },
+      groupId: "markers",
+      candidateScore: .9,
+      model: "circle"
+    }));
+    const tracker = createMultiPointTracker(seeds);
+    tracker.initialize();
+    const result = tracker.process(seeds.map(item => ({
+      pointId: item.pointId,
+      predicted: item.snapped,
+      refined: { x: item.snapped.x + 50, y: item.snapped.y + 25 },
       confidence: .95,
       residual: .1
     })), 33, {
+      decision: "rejected",
+      failureClass: "hard-geometry",
+      usableForPrediction: false,
       accepted: false,
       matchCount: 120,
       inlierRatio: .8,
@@ -87,7 +124,9 @@ describe("multi-point primitives", () => {
     });
 
     expect(result.paused).toBe(true);
-    expect(result.tracks.every(track => track.state === "paused")).toBe(true);
+    expect(result.tracks.every(track => track.state === "lost" && track.missingReason === "registration-hard-failure")).toBe(true);
+    const snapshot = tracker.snapshot();
+    expect(snapshot.positions).toEqual(seeds.map(seed => [seed.pointId, seed.snapped]));
   });
 
   it("preserves descriptor distance on a gated natural track", () => {

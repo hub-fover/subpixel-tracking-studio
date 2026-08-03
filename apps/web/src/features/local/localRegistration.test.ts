@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { GrayPatch } from "@subpixel/algorithms";
-import { composeRegistrationGuidance, composeRegistrationTransforms, reconcileRegistrationGuidance, registerAdjacentPatches, registerLocalPatches, validateProjectedFrame } from "./localRegistration";
+import { classifyRegistrationQuality, composeRegistrationGuidance, composeRegistrationTransforms, reconcileRegistrationGuidance, registerAdjacentPatches, registerLocalPatches, validateProjectedFrame } from "./localRegistration";
 
 function translatedPatch(dx: number, dy: number): { reference: GrayPatch; current: GrayPatch } {
   const width = 64; const height = 48; const reference = new Float32Array(width * height); const current = new Float32Array(width * height);
@@ -14,10 +14,43 @@ function translatedPatch(dx: number, dy: number): { reference: GrayPatch; curren
 }
 
 describe("local registration", () => {
+  it("classifies 9.6 percent coverage with otherwise strong geometry as provisional", () => {
+    const result = classifyRegistrationQuality({
+      matchCount: 64,
+      inlierCount: 50,
+      inlierRatio: .78125,
+      medianSymmetricTransferError: .43,
+      inlierCoverage: .096,
+      transformConsistencyError: 1.1,
+      hasFiniteInvertibleTransform: true,
+      projectedFrameAccepted: true
+    });
+
+    expect(result).toEqual({
+      decision: "provisional",
+      usableForPrediction: true,
+      failureClass: "soft-quality",
+      reason: "registration.low-coverage"
+    });
+  });
+
+  it("hard-rejects singular geometry regardless of matching quality", () => {
+    expect(classifyRegistrationQuality({
+      matchCount: 120,
+      inlierCount: 100,
+      inlierRatio: .83,
+      medianSymmetricTransferError: .4,
+      inlierCoverage: .4,
+      transformConsistencyError: 1,
+      hasFiniteInvertibleTransform: false,
+      projectedFrameAccepted: true
+    })).toMatchObject({ decision: "rejected", usableForPrediction: false, failureClass: "hard-geometry" });
+  });
+
   it("estimates native-pixel translation and returns a homography", () => {
     const patches = translatedPatch(5, -3);
     const result = registerLocalPatches(patches.reference, patches.current, 2);
-    expect(result.accepted).toBe(true);
+    expect(result).toMatchObject({ accepted: false, decision: "provisional", usableForPrediction: true, failureClass: "engine-unavailable" });
     expect(result.method).toBe("translation-fallback");
     expect(result.reprojectionErrorSemantics).toBe("not-available");
     expect(result.medianSymmetricTransferError).toBeNull();

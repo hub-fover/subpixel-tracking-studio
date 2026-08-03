@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MultiPointTrack, PointSeed } from "@subpixel/contracts";
-import { appendRiskNotice, appendTracks, clearRiskNotices, clonePointSetState, createPointSetState, flattenTracks, pointRows, summarizeProcessing } from "./pointSetState";
+import { appendFrameLedgerEntry, appendRiskNotice, appendTracks, clearRiskNotices, clonePointSetState, createPointSetState, flattenTracks, pointRows, summarizeProcessing } from "./pointSetState";
 
 const seed = (id: string): PointSeed => ({
   pointId: id, click: { x: 10, y: 20 }, snapped: { x: 10, y: 20 }, roi: { x: 0, y: 0, width: 20, height: 20 },
@@ -50,6 +50,31 @@ describe("point set state", () => {
     state = appendTracks(state, [track("p-001", 1), track("p-002", 1), track("p-003", 1)]);
     expect(flattenTracks(state)).toHaveLength(6);
     expect([...state.tracksByPoint.entries()].map(([id, tracks]) => [id, tracks.length])).toEqual([["p-001", 2], ["p-002", 2], ["p-003", 2]]);
+  });
+
+  it("keeps one ledger entry for every offline input even when a middle frame is isolated", () => {
+    let state = createPointSetState([seed("p-001")]);
+    for (let inputIndex = 0; inputIndex < 10; inputIndex += 1) {
+      state = appendFrameLedgerEntry(state, {
+        inputIndex,
+        frame: inputIndex,
+        sourceName: `Z1_${String(inputIndex + 1).padStart(2, "0")}.png`,
+        timestampMs: inputIndex * 40,
+        decodeStatus: "decoded",
+        processingStatus: inputIndex === 4 ? "isolated" : "processed",
+        validCount: inputIndex === 4 ? 0 : 1,
+        provisionalCount: 0,
+        suspectCount: 0,
+        missingCount: inputIndex === 4 ? 1 : 0,
+        keyframe: inputIndex === 0,
+        registrationDecision: inputIndex === 4 ? "rejected" : "accepted",
+        failureReason: inputIndex === 4 ? "registration.invalid-projected-frame" : null
+      });
+    }
+
+    expect(state.frameLedger).toHaveLength(10);
+    expect(state.frameLedger[4]).toMatchObject({ processingStatus: "isolated", missingCount: 1 });
+    expect(state.frameLedger.at(-1)?.frame).toBe(9);
   });
 
   it("supports the 100-point limit with stable ordering", () => {

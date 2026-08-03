@@ -23,6 +23,30 @@
 .asset-checklist { display:grid; grid-template-columns:1fr 1fr; gap:5px 8px; padding:8px; border:1px solid var(--line); background:#fff; }.asset-checklist label { display:flex; grid-template-columns:none; align-items:center; gap:5px; overflow-wrap:anywhere; }.asset-checklist input { width:auto; }
 .image-layer { position:relative; flex:none; transform-origin:center center; will-change:transform }
 .image-layer { position:absolute; }
+.frame-progress { min-height:34px; display:flex; align-items:center; justify-content:center; gap:18px; padding:6px 16px; background:#fff; border-bottom:1px solid var(--line); color:#45515a; font-size:12px; }
+.frame-progress strong { font:600 12px ui-monospace,monospace; color:#17202a; }
+.frame-progress span { color:#65717a; }
+.state-provisional { background:#fff1cf; color:#875500; border-bottom:1px dashed #bd7a16; }
+@media (max-width:720px) { .frame-progress { align-items:flex-start; flex-direction:column; gap:2px; padding:7px 12px; } }
+.report-chart { margin:12px 0; background:#fff; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+.report-chart svg { display:block; width:100%; height:auto; min-height:190px; }
+.report-chart figcaption { padding:0 12px 10px; color:#66717a; font-size:10px; line-height:1.45; }
+.chart-title { fill:#243039; font-size:12px; font-weight:650; }
+.chart-grid { stroke:#d9e0e4; stroke-width:.65; shape-rendering:crispEdges; }
+.chart-grid-x { stroke-dasharray:2 3; opacity:.7; }
+.chart-tick,.chart-axis-label,.chart-legend,.chart-threshold-label,.topology-label { fill:#66717a; font-size:9px; }
+.chart-axis-label { font-size:9.5px; }
+.chart-threshold { stroke:#a94b43; stroke-width:1; stroke-dasharray:4 3; }
+.chart-threshold-label { fill:#93423b; }
+.chart-mark { stroke:currentColor; stroke-width:1.2; vector-effect:non-scaling-stroke; }
+.chart-mark-valid { fill:#fff; }.chart-mark-provisional { fill:#f5b700; }.chart-mark-suspect { fill:#c84f44; }
+.topology-reference-edge { stroke:#9eabb3; stroke-width:1.2; }.topology-current-edge { stroke:#b46b10; stroke-width:1.7; stroke-dasharray:5 3; }
+.topology-reference-node { fill:#fff; stroke:#6f7d86; }.topology-current-node { fill:#087f73; stroke:#fff; stroke-width:1.2; }
+.topology-current-node.state-provisional { fill:#d78b13; }.topology-current-node.state-suspect,.topology-current-node.state-lost { fill:#b24b43; }
+.topology-displacement { stroke:#455d6b; stroke-width:1; }.topology-label { font-size:8.5px; fill:#26323a; }
+.point-report-charts { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.point-report-charts .report-chart { margin:0; }
+@media (max-width:720px) { .point-report-charts { grid-template-columns:1fr; }.report-chart svg { min-height:170px; } }
 .roi-overlay { position:absolute; inset:0; width:100%; height:100%; display:block; overflow:visible; pointer-events:none }
 .overlay-label { font-family:ui-monospace,monospace; font-weight:700; paint-order:stroke; stroke:#111820; stroke-width:3px; stroke-linejoin:round }
 .report-launcher { position:fixed; right:18px; top:66px; z-index:8; display:flex; align-items:center; gap:6px; padding:8px 12px; color:white; background:#007a6f; border:1px solid #42b9ad; border-radius:4px; box-shadow:0 2px 8px #0003; }

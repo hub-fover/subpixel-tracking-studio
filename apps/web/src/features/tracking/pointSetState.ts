@@ -1,4 +1,4 @@
-import type { CameraSession, FrameRegistration, MultiPointTrack, PointSeed, ProcessingStats, RecoveryEvent, RiskNotice } from "@subpixel/contracts";
+import type { CameraSession, FrameLedgerEntry, FrameRegistration, MultiPointTrack, PointSeed, ProcessingStats, RecoveryEvent, RiskNotice } from "@subpixel/contracts";
 
 export type PointSetState = {
   seeds: PointSeed[];
@@ -9,6 +9,7 @@ export type PointSetState = {
   riskNotices: RiskNotice[];
   cameraSession: CameraSession;
   processingStats: ProcessingStats;
+  frameLedger: FrameLedgerEntry[];
   referenceFrame?: { width: number; height: number; timestampMs: number };
   recording: { active: boolean; mimeType: string | null; blob: Blob | null; durationMs: number | null };
 };
@@ -19,6 +20,7 @@ export function createPointSetState(seeds: PointSeed[] = []): PointSetState {
     riskNotices: [],
     cameraSession: { status: "idle", facingMode: "environment", nativeWidth: null, nativeHeight: null, recording: false, error: null },
     processingStats: { processedFrames: 0, droppedFrames: 0, fps: 0, p95LatencyMs: 0, engine: "typescript", nativeWidth: null, nativeHeight: null },
+    frameLedger: [],
     recording: { active: false, mimeType: null, blob: null, durationMs: null }
   };
 }
@@ -42,6 +44,14 @@ export function flattenTracks(state: PointSetState): MultiPointTrack[] {
 
 export function appendRegistration(state: PointSetState, registration: FrameRegistration): PointSetState {
   return { ...state, registrations: [...state.registrations.filter(item => item.frame !== registration.frame), registration].sort((a, b) => a.frame - b.frame) };
+}
+
+export function appendFrameLedgerEntry(state: PointSetState, entry: FrameLedgerEntry): PointSetState {
+  return {
+    ...state,
+    frameLedger: [...state.frameLedger.filter(item => item.inputIndex !== entry.inputIndex), entry]
+      .sort((left, right) => left.inputIndex - right.inputIndex)
+  };
 }
 
 export function appendRecoveryEvent(state: PointSetState, event: RecoveryEvent): PointSetState {
@@ -69,6 +79,7 @@ export function clonePointSetState(state: PointSetState): PointSetState {
     riskNotices: state.riskNotices.map(notice => ({ ...notice })),
     cameraSession: { ...state.cameraSession },
     processingStats: { ...state.processingStats },
+    frameLedger: state.frameLedger.map(entry => ({ ...entry })),
     referenceFrame: state.referenceFrame ? { ...state.referenceFrame } : undefined,
     recording: { ...state.recording }
   };

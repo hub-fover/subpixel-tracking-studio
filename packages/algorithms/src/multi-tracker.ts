@@ -1,6 +1,6 @@
-import type { MultiPointTrack, PointSeed } from "@subpixel/contracts";
+import type { FrameRegistration, MultiPointTrack, PointSeed } from "@subpixel/contracts";
 import { validateNaturalMatch } from "./natural-features";
-import { applyLocalAffine, shouldPauseMultiPoint, type Anchor } from "./anchor-propagation";
+import { applyLocalAffine, type Anchor } from "./anchor-propagation";
 
 export type MultiPointObservation = {
   pointId: string;
@@ -29,14 +29,25 @@ export type MultiPointTrackerSnapshot = {
   positions: Array<readonly [string, { x: number; y: number }]>;
 };
 
+export type MultiPointProcessingPolicy = {
+  pauseOnHardFailure?: boolean;
+  pauseOnInvalidRatio?: boolean;
+};
+
 export function createMultiPointTracker(seeds: PointSeed[], options: { pauseLostRatio?: number } = {}) {
   const pauseLostRatio = options.pauseLostRatio ?? 0.2;
   let frame = 0;
   let previous = new Map<string, { x: number; y: number }>();
   let paused = false;
 
-  function process(observations: MultiPointObservation[], timestampMs = 0, registration?: { matchCount: number; inlierRatio: number; medianReprojectionError: number; accepted?: boolean }): MultiPointFrameResult {
+  function process(
+    observations: MultiPointObservation[],
+    timestampMs = 0,
+    registration?: Pick<FrameRegistration, "matchCount" | "inlierRatio" | "medianReprojectionError" | "accepted" | "decision" | "failureClass" | "usableForPrediction">,
+    policy: MultiPointProcessingPolicy = {}
+  ): MultiPointFrameResult {
     const byPoint = new Map(observations.map(observation => [observation.pointId, observation]));
+    const registrationDecision = registration?.decision ?? (registration?.accepted === true ? "accepted" : registration?.accepted === false ? "rejected" : undefined);
     const tracks: MultiPointTrack[] = seeds.map(seed => {
       const observation = byPoint.get(seed.pointId);
       const predicted = observation?.predicted ?? previous.get(seed.pointId) ?? seed.snapped;
@@ -52,13 +63,22 @@ export function createMultiPointTracker(seeds: PointSeed[], options: { pauseLost
         }).accepted);
         state = naturalGate && observation.confidence >= 0.35 && !(observation.gateFailures?.length) ? "valid" : "suspect";
       }
-      if (state === "valid") previous.set(seed.pointId, refined);
-      return { pointId: seed.pointId, frame, timestampMs, predicted, refined, model: seed.model, confidence: observation?.confidence ?? 0, residual: observation?.residual ?? Infinity, flowErrorForwardBackward: observation?.metrics?.forwardBackwardError ?? null, ncc: observation?.metrics?.ncc ?? null, descriptorDistance: observation?.metrics?.descriptorDistance ?? null, epipolarError: observation?.metrics?.epipolarError ?? null, predictionSource: observation?.predictionSource ?? "previous-position", innovationPx: Math.hypot(refined.x - predicted.x, refined.y - predicted.y), localAffineResidualPx: observation?.localAffineResidualPx ?? null, gateFailures: observation?.gateFailures ?? [], candidateUniqueness: observation?.candidateUniqueness ?? null, state, relocationMethod: observation?.relocationMethod ?? "none" } satisfies MultiPointTrack;
+      const pointGatePassed = state === "valid";
+      if (pointGatePassed && registrationDecision === "provisional") state = "provisional";
+      if (pointGatePassed && registrationDecision !== "rejected") previous.set(seed.pointId, refined);
+      return { pointId: seed.pointId, frame, timestampMs, predicted, refined, model: seed.model, confidence: observation?.confidence ?? 0, residual: observation?.residual ?? Infinity, flowErrorForwardBackward: observation?.metrics?.forwardBackwardError ?? null, ncc: observation?.metrics?.ncc ?? null, descriptorDistance: observation?.metrics?.descriptorDistance ?? null, epipolarError: observation?.metrics?.epipolarError ?? null, predictionSource: observation?.predictionSource ?? "previous-position", innovationPx: Math.hypot(refined.x - predicted.x, refined.y - predicted.y), localAffineResidualPx: observation?.localAffineResidualPx ?? null, gateFailures: observation?.gateFailures ?? [], candidateUniqueness: observation?.candidateUniqueness ?? null, registrationDecision, pointGatePassed, topologyErrorPx: null, missingReason: observation ? null : "point-observation-missing", state, relocationMethod: observation?.relocationMethod ?? "none" } satisfies MultiPointTrack;
     });
+    const hardRegistrationFailure = registrationDecision === "rejected"
+      && (registration?.failureClass === "hard-geometry" || registration?.failureClass === "engine-unavailable" || registration?.failureClass === undefined);
+    if (hardRegistrationFailure) for (const track of tracks) {
+      track.state = "lost";
+      track.missingReason = "registration-hard-failure";
+    }
     const lost = tracks.filter(track => track.state === "lost").length;
     const invalid = tracks.filter(track => track.state === "lost" || track.state === "suspect").length;
-    const registrationPause = registration?.accepted === false || Boolean(registration && shouldPauseMultiPoint({ total: seeds.length, lost, matchCount: registration.matchCount, inlierRatio: registration.inlierRatio, medianReprojectionError: registration.medianReprojectionError }));
-    paused = paused || invalid / Math.max(seeds.length, 1) >= pauseLostRatio || registrationPause;
+    const registrationPause = (policy.pauseOnHardFailure ?? true) && hardRegistrationFailure;
+    const invalidPause = (policy.pauseOnInvalidRatio ?? true) && invalid / Math.max(seeds.length, 1) >= pauseLostRatio;
+    paused = paused || invalidPause || registrationPause;
     if (paused) for (const track of tracks) if (track.state === "valid") track.state = "paused";
     frame += 1;
     return { tracks, paused, lostRatio: lost / Math.max(seeds.length, 1), invalidRatio: invalid / Math.max(seeds.length, 1) };

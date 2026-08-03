@@ -212,4 +212,56 @@ describe("report model", () => {
     expect(frames[0]).toBe(1);
     expect(frames.at(-1)).toBe(59);
   });
+
+  it("builds fixed first-frame group topology and keeps disabled edges disabled", () => {
+    const seeds = [
+      { ...seed("p-1"), snapped: { x: 0, y: 0 }, groupId: "g-1" },
+      { ...seed("p-2"), snapped: { x: 100, y: 0 }, groupId: "g-1" },
+      { ...seed("p-3"), snapped: { x: 100, y: 100 }, groupId: "g-1" },
+      { ...seed("p-4"), snapped: { x: 0, y: 100 }, groupId: "g-1" }
+    ];
+    const first = buildReportModel(snapshot(seeds), metadata);
+    expect(first.topology).toHaveLength(5);
+    const disabled = first.topology[0].edgeId;
+    const second = buildReportModel({ ...snapshot(seeds), disabledTopologyEdgeIds: [disabled] }, metadata);
+    expect(second.topology.find(edge => edge.edgeId === disabled)?.enabled).toBe(false);
+  });
+
+  it("reports frame completeness and computes optional calibrated ground-truth errors", () => {
+    const input = snapshot([seed("p-1")], [
+      track("p-1", 0, { refined: { x: 2, y: 4 } }),
+      track("p-1", 1, { refined: { x: 4, y: 8 }, state: "provisional" })
+    ]);
+    input.frameLedger = Array.from({ length: 10 }, (_, inputIndex) => ({
+      inputIndex,
+      frame: inputIndex,
+      sourceName: `Z1_${inputIndex + 1}.png`,
+      timestampMs: inputIndex * 40,
+      decodeStatus: "decoded" as const,
+      processingStatus: inputIndex === 4 ? "isolated" as const : "processed" as const,
+      validCount: inputIndex === 0 ? 1 : 0,
+      provisionalCount: inputIndex === 1 ? 1 : 0,
+      suspectCount: 0,
+      missingCount: inputIndex === 4 ? 1 : 0,
+      keyframe: inputIndex === 0,
+      registrationDecision: inputIndex === 4 ? "rejected" as const : "accepted" as const,
+      failureReason: inputIndex === 4 ? "registration.invalid-projected-frame" : null
+    }));
+    input.calibration = {
+      xUnitsPerPixel: .5, yUnitsPerPixel: .25, unit: "mm",
+      pixelOrigin: { x: 0, y: 0 }, engineeringOrigin: { x: 0, y: 0 }, yAxisDirection: "down"
+    };
+    input.groundTruth = [
+      { pointId: "p-1", frame: 0, x: 1.2, y: .8, unit: "mm" },
+      { pointId: "p-1", frame: 1, x: 1.8, y: 2.2, unit: "mm" }
+    ];
+
+    const report = buildReportModel(input, metadata);
+
+    expect(report.execution).toMatchObject({ inputFrameCount: 10, processedFrameCount: 9, isolatedFrameCount: 1, missingFrameCount: 1 });
+    expect(report.frameLedger).toHaveLength(10);
+    expect(report.groundTruthErrors[0]).toMatchObject({ pointId: "p-1", unit: "mm", count: 2, biasX: 0, biasY: 0, maeX: .2, maeY: .2 });
+    expect(report.groundTruthErrors[0].rmseX).toBeCloseTo(.2, 10);
+    expect(report.groundTruthErrors[0].radialMax).toBeCloseTo(Math.hypot(.2, .2), 10);
+  });
 });

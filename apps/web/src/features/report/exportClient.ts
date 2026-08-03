@@ -78,7 +78,13 @@ function markedCanvas(payload: ExportPayload, image = payload.currentImage ?? pa
   const ctx = canvas.getContext("2d")!; ctx.fillStyle = "#111820"; ctx.fillRect(0, 0, output.width, output.height); if (image) ctx.drawImage(image, 0, 0, output.width, output.height);
   const scale = output.scale;
   ctx.strokeStyle = "#f5b700"; ctx.lineWidth = Math.max(1, output.width / 3000); ctx.strokeRect(payload.roi.x * scale, payload.roi.y * scale, payload.roi.width * scale, payload.roi.height * scale);
-  ctx.strokeStyle = "#00d4bd"; for (const track of payload.multiTracks ?? []) { ctx.beginPath(); ctx.arc(track.refined.x * scale, track.refined.y * scale, Math.max(2, output.width / 1200), 0, Math.PI * 2); ctx.stroke(); }
+  const referenceMode = image === payload.referenceImage;
+  const latestByPoint = new Map<string, MultiPointTrack>();
+  for (const track of payload.multiTracks ?? []) {
+    const previous = latestByPoint.get(track.pointId);
+    if (!previous || track.frame > previous.frame) latestByPoint.set(track.pointId, track);
+  }
+  ctx.strokeStyle = "#00d4bd"; if (!referenceMode) for (const track of latestByPoint.values()) { ctx.beginPath(); ctx.arc(track.refined.x * scale, track.refined.y * scale, Math.max(2, output.width / 1200), 0, Math.PI * 2); ctx.stroke(); }
   for (const track of payload.tracks) { ctx.beginPath(); ctx.arc(track.x * scale, track.y * scale, Math.max(2, output.width / 1200), 0, Math.PI * 2); ctx.stroke(); }
   for (const seed of payload.points ?? payload.seeds ?? []) { ctx.beginPath(); ctx.arc(seed.snapped.x * scale, seed.snapped.y * scale, Math.max(2, output.width / 1200), 0, Math.PI * 2); ctx.stroke(); }
   return canvas;
@@ -103,12 +109,23 @@ export async function exportTracking(format: ExportFormat, payload: ExportPayloa
       reference ? { kind: "image", path: "media/reference-points.png", data: reference } : { kind: "image", path: "media/reference-points.png", error: "没有可用参考帧" },
       current ? { kind: "image", path: "media/current-tracks.png", data: current } : { kind: "image", path: "media/current-tracks.png", error: "没有可用当前帧" }
     ];
-    const annotatedDataUrl = (payload.currentImage ?? payload.image) ? markedCanvas(payload, payload.currentImage ?? payload.image, 2048).toDataURL("image/jpeg", .9) : undefined;
-    const { blob, manifest } = await buildReportBundle(payload.reportModel, assets, annotatedDataUrl, options);
+    const referenceDataUrl = (payload.referenceImage ?? payload.image) ? markedCanvas(payload, payload.referenceImage ?? payload.image, 2048).toDataURL("image/jpeg", .9) : undefined;
+    const currentDataUrl = (payload.currentImage ?? payload.image) ? markedCanvas(payload, payload.currentImage ?? payload.image, 2048).toDataURL("image/jpeg", .9) : undefined;
+    const { blob, manifest } = await buildReportBundle(payload.reportModel, assets, { reference: referenceDataUrl, current: currentDataUrl }, options);
     download(blob, `${reportFileStem(payload.reportModel)}.zip`);
     return { manifest };
   }
-  if (payload.reportModel && format === "pdf") { let imageData: string | undefined; try { imageData = (payload.currentImage ?? payload.image) ? markedCanvas(payload, payload.currentImage ?? payload.image, 2048).toDataURL("image/jpeg", .9) : undefined; } catch { imageData = undefined; } download(await buildReportPdf(payload.reportModel, imageData, options), `${reportFileStem(payload.reportModel)}.pdf`); return undefined; }
+  if (payload.reportModel && format === "pdf") {
+    let reportImages: { reference?: string; current?: string } = {};
+    try {
+      reportImages = {
+        reference: (payload.referenceImage ?? payload.image) ? markedCanvas(payload, payload.referenceImage ?? payload.image, 2048).toDataURL("image/jpeg", .9) : undefined,
+        current: (payload.currentImage ?? payload.image) ? markedCanvas(payload, payload.currentImage ?? payload.image, 2048).toDataURL("image/jpeg", .9) : undefined
+      };
+    } catch { reportImages = {}; }
+    download(await buildReportPdf(payload.reportModel, reportImages, options), `${reportFileStem(payload.reportModel)}.pdf`);
+    return undefined;
+  }
   if (payload.reportModel && format === "xlsx") { download(await buildReportXlsx(payload.reportModel, options), `${reportFileStem(payload.reportModel)}.xlsx`); return undefined; }
   if (payload.reportModel && format === "json") { download(new Blob([reportJson(payload.reportModel)], { type: "application/json" }), `${reportFileStem(payload.reportModel)}.json`); return undefined; }
   if (format === "json") { download(new Blob([JSON.stringify({ generatedAt: new Date().toISOString(), ...document }, null, 2)], { type: "application/json" }), "subpixel-results.json"); return undefined; }

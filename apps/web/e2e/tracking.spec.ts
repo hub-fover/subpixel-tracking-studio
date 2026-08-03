@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
+import { join } from "node:path";
 
 const sample = "C:\\Users\\biaoh\\Desktop\\1\\圆\\1.jpg";
 
@@ -75,4 +76,45 @@ test("browser PDF export embeds a searchable Chinese TrueType font", async ({ pa
   const binary = (await readFile(path!)).toString("latin1");
   expect(binary).toContain("/FontFile2"); expect(binary).toContain("/ToUnicode");
   expect(errors.filter(message => /font|PubSub|jsPDF/i.test(message))).toEqual([]); expect(apiRequests).toEqual([]);
+});
+
+test("Z1 offline replay attempts all 10 inputs and exposes engineering charts", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "The full native-image replay runs once on desktop.");
+  test.setTimeout(120_000);
+  const z1Directory = "C:\\Users\\biaoh\\Desktop\\1\\十字丝\\Z1";
+  const frames = (await readdir(z1Directory).catch(() => [])).filter(name => /\.jpe?g$/i.test(name)).sort().map(name => join(z1Directory, name));
+  test.skip(frames.length !== 10, "Requires the optional local Z1 replay fixture.");
+  expect(frames).toHaveLength(10);
+
+  await page.goto("/");
+  await page.locator('input[type="file"]').setInputFiles(frames);
+  await expect(page.locator("canvas.roi-canvas")).toHaveAttribute("width", "1279", { timeout: 15_000 });
+  await expect(page.locator("canvas.roi-canvas")).toHaveAttribute("height", "1706");
+  await page.getByLabel("提取类型").selectOption("crosshair-center");
+  await dragRoi(page, { x: .43, y: .18 }, { x: .48, y: .25 });
+  await expect(page.locator(".draft-ready")).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("button", { name: "确认点" }).click();
+
+  await page.getByRole("button", { name: "开始跟踪" }).click();
+  const degraded = page.getByRole("button", { name: "确认小位移降级模式" });
+  if (await degraded.isVisible({ timeout: 5_000 }).catch(() => false)) {
+    await degraded.click();
+    await page.getByRole("button", { name: "开始跟踪" }).click();
+  }
+  await expect(page.getByTestId("frame-progress")).toContainText("输入/已处理 10/10", { timeout: 60_000 });
+
+  await page.getByRole("button", { name: "报告" }).click();
+  const dialog = page.getByRole("dialog", { name: "报告中心" });
+  await expect(dialog).toContainText("10/10");
+  await expect(dialog.locator('[data-chart-id="fixed-topology"] svg')).toBeVisible();
+  await dialog.getByRole("button", { name: "点质量" }).click();
+  await expect(dialog.locator('[data-chart-id$="-trajectory"] svg')).toBeVisible();
+  await expect(dialog.locator('[data-chart-id$="-confidence"] svg')).toBeVisible();
+  if (process.env.REPORT_QA_SCREENSHOT) await dialog.screenshot({ path: process.env.REPORT_QA_SCREENSHOT });
+  if (process.env.REPORT_QA_PDF) {
+    const downloadPromise = page.waitForEvent("download");
+    await dialog.getByRole("button", { name: "PDF", exact: true }).click();
+    const download = await downloadPromise;
+    await download.saveAs(process.env.REPORT_QA_PDF);
+  }
 });

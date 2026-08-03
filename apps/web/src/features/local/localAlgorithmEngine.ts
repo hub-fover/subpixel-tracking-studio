@@ -15,6 +15,7 @@ export type LocalTrackContext = {
   previousSearches: Map<string, LocalSearchRegion>;
   referencePositions?: Map<string, { x: number; y: number }>;
   registration?: RegistrationGuidance;
+  runMode?: "offline" | "live";
   tracker: ReturnType<typeof createMultiPointTracker>;
 };
 
@@ -95,7 +96,7 @@ export class LocalAlgorithmEngine {
     const referenceSize = imageDimensions(reference.image);
     const currentSize = imageDimensions(current.image);
     if (!referenceSize || !currentSize || referenceSize.width !== currentSize.width || referenceSize.height !== currentSize.height) {
-      return { frame, method: "none", matchCount: 0, inlierCount: 0, inlierRatio: 0, medianReprojectionError: Infinity, accepted: false, reason: "registration.dimension-mismatch" };
+      return { frame, sourceFrame: reference.frame, targetFrame: frame, method: "none", matchCount: 0, inlierCount: 0, inlierRatio: 0, medianReprojectionError: Infinity, decision: "rejected", usableForPrediction: false, failureClass: "hard-geometry", guidanceSource: "direct", accepted: false, reason: "registration.dimension-mismatch" };
     }
     return registerLocalPatches(extractNativePatch(reference.image, { x: 0, y: 0, width: referenceSize.width, height: referenceSize.height }), extractNativePatch(current.image, { x: 0, y: 0, width: currentSize.width, height: currentSize.height }), frame, reference.frame);
   }
@@ -104,7 +105,7 @@ export class LocalAlgorithmEngine {
     const referenceSize = imageDimensions(reference.image);
     const currentSize = imageDimensions(current.image);
     if (!referenceSize || !currentSize || referenceSize.width !== currentSize.width || referenceSize.height !== currentSize.height) {
-      return { frame: current.frame, sourceFrame: reference.frame, targetFrame: current.frame, method: "adjacent-flow", matchCount: 0, inlierCount: 0, inlierRatio: 0, medianReprojectionError: Infinity, accepted: false, reason: "registration.dimension-mismatch" };
+      return { frame: current.frame, sourceFrame: reference.frame, targetFrame: current.frame, method: "adjacent-flow", matchCount: 0, inlierCount: 0, inlierRatio: 0, medianReprojectionError: Infinity, decision: "rejected", usableForPrediction: false, failureClass: "hard-geometry", guidanceSource: "adjacent", accepted: false, reason: "registration.dimension-mismatch" };
     }
     const anchors: SceneRegistrationAnchor[] = [];
     for (const sample of adjacentSampleRois(referenceSize)) {
@@ -125,13 +126,15 @@ export class LocalAlgorithmEngine {
       if (!template) continue;
       const previous = context.positions.get(seed.pointId) ?? seed.snapped;
       const referencePoint = context.referencePositions?.get(seed.pointId) ?? seed.snapped;
-      const hasRegistration = Boolean(context.registration?.accepted && context.registration.transform?.matrix);
+      const hasRegistration = Boolean((context.registration?.usableForPrediction ?? context.registration?.accepted) && context.registration?.transform?.matrix);
       const globalPrediction = hasRegistration ? transformPoint(referencePoint, context.registration?.transform?.matrix) : previous;
       const localGuidance = hasRegistration ? nearestLocalPrediction(referencePoint, context.registration?.sceneAnchors) : { result: undefined, failure: undefined };
       const localPrediction = localGuidance.result;
       const predicted = localPrediction?.point ?? globalPrediction;
       const predictionSource: MultiPointTrack["predictionSource"] = localPrediction ? "local-affine" : hasRegistration ? "reference-homography" : "previous-position";
-      const registrationError = context.registration?.accepted ? context.registration.medianReprojectionError : 0;
+      const registrationError = hasRegistration
+        ? context.registration?.medianSymmetricTransferError ?? context.registration?.medianReprojectionError ?? 0
+        : 0;
       const radius = seed.model === "natural-keypoint"
         ? Math.min(192, Math.max(24, Math.max(template.width, template.height) * 1.5, registrationError * 3 + 24))
         : Math.max(10, Math.min(96, Math.max(template.width, template.height) * .5));
@@ -210,6 +213,8 @@ export class LocalAlgorithmEngine {
         observations.push({ pointId: seed.pointId, predicted, refined, confidence, residual, relocationMethod, predictionSource, localAffineResidualPx: localPrediction?.residual ?? null, gateFailures, candidateUniqueness, metrics: seed.model === "natural-keypoint" ? { forwardBackwardError: forwardBackwardError ?? Infinity, ncc: match.ncc, epipolarError, loweRatio: descriptor?.loweRatio, descriptorDistance: descriptor?.distance } : undefined });
       } catch { /* The tracker records this point as lost. */ }
     }
-    return context.tracker.process(observations, frame.timestampMs, context.registration);
+    return context.tracker.process(observations, frame.timestampMs, context.registration, context.runMode === "offline"
+      ? { pauseOnHardFailure: false, pauseOnInvalidRatio: false }
+      : undefined);
   }
 }

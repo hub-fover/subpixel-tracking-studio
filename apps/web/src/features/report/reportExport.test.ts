@@ -17,12 +17,14 @@ import { resetReportPdfFontCache } from "./reportPdfFont";
 const validFont = readFileSync(new URL("../../../public/fonts/NotoSansSC-Variable.ttf", import.meta.url));
 
 const report = {
+  schemaVersion: 3,
   metadata: { reportNumber: "R-1", reportId: "report-1", projectName: "项目/一", testId: "T-1", operator: "", notes: "备注", sourceFile: "input.png", generatedAt: "2026-08-02T08:00:00.000Z", buildCommit: "dev" },
   thresholds: { passValidRatio: .95, reviewValidRatio: .8, passConfidenceP50: .8, reviewConfidenceP50: .55, failLostRatio: .2, reviewDroppedFrameRatio: .1 },
   options: { includedAssets: [], keyFrameCount: 20, imageQuality: "full", language: "zh-CN" },
-  grade: "not-evaluated", execution: { pointCount: 2, frameCount: 0, sampleCount: 0, stateCounts: { valid: 0, suspect: 0, lost: 0, reviewed: 0, paused: 0 }, validRatio: 0, lostRatio: 0, droppedFrameRatio: 0, processingStats: { processedFrames: 0, droppedFrames: 0, fps: 0, p95LatencyMs: 0, engine: "typescript", nativeWidth: null, nativeHeight: null } },
-  points: [{ pointId: "p-2", groupId: "default", model: "circle", grade: "not-evaluated", finalState: null, sampleCount: 0, stateCounts: { valid: 0, suspect: 0, lost: 0, reviewed: 0, paused: 0 }, validRatio: 0, lostRatio: 0, start: null, end: null, dx: null, dy: null, xRange: null, yRange: null, confidence: { p50: null, p95: null }, gatingFailures: {}, relocationMethods: {} }, { pointId: "p-1", groupId: "default", model: "circle", grade: "not-evaluated", finalState: null, sampleCount: 0, stateCounts: { valid: 0, suspect: 0, lost: 0, reviewed: 0, paused: 0 }, validRatio: 0, lostRatio: 0, start: null, end: null, dx: null, dy: null, xRange: null, yRange: null, confidence: { p50: null, p95: null }, gatingFailures: {}, relocationMethods: {} }],
-  tracks: [], registrations: [], events: [], chartSeries: [], registration: { count: 0, acceptedCount: 0, rejectedCount: 0, successRate: 0, meanInlierRatio: null, medianInlierRatio: null, meanReprojectionError: null, p95ReprojectionError: null, methodDistribution: {} }, anomalyIntervals: [], risks: [], humanInterventions: [], keyFrames: []
+  grade: "not-evaluated", execution: { pointCount: 2, frameCount: 0, sampleCount: 0, inputFrameCount: 0, processedFrameCount: 0, isolatedFrameCount: 0, missingFrameCount: 0, stateCounts: { valid: 0, provisional: 0, suspect: 0, lost: 0, reviewed: 0, paused: 0 }, validRatio: 0, lostRatio: 0, droppedFrameRatio: 0, processingStats: { processedFrames: 0, droppedFrames: 0, fps: 0, p95LatencyMs: 0, engine: "typescript", nativeWidth: null, nativeHeight: null } },
+  points: [{ pointId: "p-2", groupId: "default", model: "circle", grade: "not-evaluated", finalState: null, sampleCount: 0, stateCounts: { valid: 0, provisional: 0, suspect: 0, lost: 0, reviewed: 0, paused: 0 }, validRatio: 0, lostRatio: 0, start: null, end: null, dx: null, dy: null, xRange: null, yRange: null, confidence: { p50: null, p95: null }, gatingFailures: {}, relocationMethods: {} }, { pointId: "p-1", groupId: "default", model: "circle", grade: "not-evaluated", finalState: null, sampleCount: 0, stateCounts: { valid: 0, provisional: 0, suspect: 0, lost: 0, reviewed: 0, paused: 0 }, validRatio: 0, lostRatio: 0, start: null, end: null, dx: null, dy: null, xRange: null, yRange: null, confidence: { p50: null, p95: null }, gatingFailures: {}, relocationMethods: {} }],
+  tracks: [], registrations: [], events: [], chartSeries: [], registration: { count: 0, acceptedCount: 0, provisionalCount: 0, rejectedCount: 0, successRate: 0, meanInlierRatio: null, medianInlierRatio: null, meanReprojectionError: null, p95ReprojectionError: null, methodDistribution: {} }, anomalyIntervals: [], risks: [], humanInterventions: [], keyFrames: [],
+  frameLedger: [], topology: [], calibration: null, groundTruth: [], internalQuality: {}, groundTruthErrors: []
 } as ReportModel;
 
 describe("report package builders", () => {
@@ -55,7 +57,10 @@ describe("report package builders", () => {
 
   it("creates stable per-table files containing every point", () => {
     const files = buildReportCsvFiles(report);
-    expect(Object.keys(files)).toEqual(["points.csv", "tracks.csv", "registrations.csv", "events.csv", "risks.csv"]);
+    expect(Object.keys(files)).toEqual([
+      "points.csv", "tracks.csv", "frame-ledger.csv", "topology.csv", "registrations.csv",
+      "internal-errors.csv", "ground-truth-errors.csv", "events.csv", "risks.csv"
+    ]);
     expect(files["points.csv"]).toContain("p-1");
     expect(files["points.csv"]).toContain("p-2");
   });
@@ -91,7 +96,7 @@ describe("report package builders", () => {
       { kind: "pdf", path: "report.pdf", error: "font unavailable" }
     ];
     const manifest = await buildReportManifest(report, assets);
-    expect(manifest.schemaVersion).toBe(2);
+    expect(manifest.schemaVersion).toBe(3);
     expect(manifest.grade).toBe("not-evaluated");
     expect(manifest.source?.kind).toBe("image-sequence");
     expect(manifest.assets).toEqual(expect.arrayContaining([
@@ -104,9 +109,13 @@ describe("report package builders", () => {
     const { blob, manifest } = await buildReportBundle(report);
     const { unzipSync } = await import("fflate");
     const files = unzipSync(new Uint8Array(await blob.arrayBuffer()));
-    expect(Object.keys(files)).toEqual(expect.arrayContaining(["manifest.json", "report.pdf", "report.xlsx", "data/report.json", "data/points.csv", "data/tracks.csv", "data/registrations.csv", "data/events.csv", "data/risks.csv"]));
+    expect(Object.keys(files)).toEqual(expect.arrayContaining([
+      "manifest.json", "report.pdf", "report.xlsx", "data/report.json", "data/points.csv", "data/tracks.csv",
+      "data/frame-ledger.csv", "data/topology.csv", "data/registrations.csv", "data/internal-errors.csv",
+      "data/ground-truth-errors.csv", "data/events.csv", "data/risks.csv"
+    ]));
     expect((manifest.assets ?? []).every(asset => asset.status === "generated")).toBe(true);
-    expect(ReportManifestSchema.parse(manifest).schemaVersion).toBe(2);
+    expect(ReportManifestSchema.parse(manifest).schemaVersion).toBe(3);
   });
 
   it("reports bundle progress and stops before packaging when cancelled", async () => {

@@ -174,7 +174,11 @@ export const MultiPointTrackSchema = z.object({
   localAffineResidualPx: z.number().nonnegative().nullable().default(null),
   gateFailures: z.array(z.string()).default([]),
   candidateUniqueness: z.number().nonnegative().nullable().default(null),
-  state: z.enum(["valid", "suspect", "lost", "reviewed", "paused"]),
+  registrationDecision: z.enum(["accepted", "provisional", "rejected"]).optional(),
+  pointGatePassed: z.boolean().optional(),
+  topologyErrorPx: z.number().nonnegative().nullable().optional(),
+  missingReason: z.string().nullable().optional(),
+  state: z.enum(["valid", "provisional", "suspect", "lost", "reviewed", "paused"]),
   relocationMethod: z.enum(["feature-refine", "klt", "local-correlation", "local-affine", "orb", "sift", "manual", "none"]).default("none")
 });
 
@@ -195,8 +199,54 @@ export const FrameRegistrationSchema = z.object({
   inlierCoverage: z.number().min(0).max(1).optional(),
   medianSymmetricTransferError: z.number().nonnegative().nullable().optional(),
   transformConsistencyError: z.number().nonnegative().nullable().optional(),
+  decision: z.enum(["accepted", "provisional", "rejected"]).optional(),
+  usableForPrediction: z.boolean().optional(),
+  failureClass: z.enum(["none", "soft-quality", "hard-geometry", "engine-unavailable"]).optional(),
+  guidanceSource: z.enum(["direct", "adjacent", "composed", "translation"]).optional(),
   accepted: z.boolean().optional(),
   reason: z.string().nullable().optional()
+});
+
+export const FrameLedgerEntrySchema = z.object({
+  inputIndex: z.number().int().nonnegative(),
+  frame: z.number().int().nonnegative().nullable(),
+  sourceName: z.string().min(1),
+  timestampMs: z.number().nonnegative().nullable(),
+  decodeStatus: z.enum(["pending", "decoded", "failed"]),
+  processingStatus: z.enum(["pending", "processed", "isolated", "skipped"]),
+  validCount: z.number().int().nonnegative(),
+  provisionalCount: z.number().int().nonnegative(),
+  suspectCount: z.number().int().nonnegative(),
+  missingCount: z.number().int().nonnegative(),
+  keyframe: z.boolean(),
+  registrationDecision: z.enum(["accepted", "provisional", "rejected"]).nullable(),
+  failureReason: z.string().nullable()
+});
+
+export const PointTopologyEdgeSchema = z.object({
+  edgeId: z.string().min(1),
+  groupId: z.string().min(1),
+  sourcePointId: z.string().min(1),
+  targetPointId: z.string().min(1),
+  referenceLengthPx: z.number().nonnegative(),
+  enabled: z.boolean().default(true)
+});
+
+export const CalibrationScaleSchema = z.object({
+  xUnitsPerPixel: z.number().positive(),
+  yUnitsPerPixel: z.number().positive(),
+  unit: z.string().min(1),
+  pixelOrigin: PointSchema,
+  engineeringOrigin: PointSchema,
+  yAxisDirection: z.enum(["down", "up"]).default("down")
+});
+
+export const GroundTruthObservationSchema = z.object({
+  pointId: z.string().min(1),
+  frame: z.number().int().nonnegative(),
+  x: z.number().finite(),
+  y: z.number().finite(),
+  unit: z.string().min(1)
 });
 
 export const AnchorCorrespondenceSchema = z.object({
@@ -347,7 +397,7 @@ const ReportAssetSchema = z.object({
 });
 
 export const ReportManifestSchema = z.object({
-  schemaVersion: z.union([z.literal(1), z.literal(2)]).optional(),
+  schemaVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]).optional(),
   reportId: z.string().min(1).optional(),
   jobId: z.string().min(1).optional(),
   algorithmVersion: z.string().min(1).optional(),
@@ -362,15 +412,15 @@ export const ReportManifestSchema = z.object({
   processingStats: ProcessingStatsSchema.optional(),
   buildCommit: z.string().min(1).optional()
 }).superRefine((value, context) => {
-  const requiredV2 = ["reportId", "jobId", "algorithmVersion", "source", "grade", "thresholds", "engine", "originalDimensions", "processingStats", "buildCommit", "assets", "parameters"] as const;
-  if (value.schemaVersion !== 2) {
+  const requiredModern = ["reportId", "jobId", "algorithmVersion", "source", "grade", "thresholds", "engine", "originalDimensions", "processingStats", "buildCommit", "assets", "parameters"] as const;
+  if (value.schemaVersion !== 2 && value.schemaVersion !== 3) {
     for (const field of ["jobId", "algorithmVersion", "summary", "assets", "parameters"] as const) {
       if (value[field] === undefined) context.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} is required for legacy report manifests` });
     }
     return;
   }
-  for (const field of requiredV2) {
-    if (value[field] === undefined) context.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} is required for report manifest v2` });
+  for (const field of requiredModern) {
+    if (value[field] === undefined) context.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: `${field} is required for modern report manifests` });
   }
   value.assets?.forEach((asset, index) => {
     if (!asset.status) context.addIssue({ code: z.ZodIssueCode.custom, path: ["assets", index, "status"], message: "status is required for report manifest v2 assets" });
@@ -388,11 +438,15 @@ export const ReportResidualSemanticsSchema = z.enum([
 ]);
 
 const ReportStateCountsSchema = z.object({
-  valid: z.number().int().nonnegative(), suspect: z.number().int().nonnegative(),
+  valid: z.number().int().nonnegative(), provisional: z.number().int().nonnegative().default(0), suspect: z.number().int().nonnegative(),
   lost: z.number().int().nonnegative(), reviewed: z.number().int().nonnegative(), paused: z.number().int().nonnegative()
 });
 const ReportExecutionSchema = z.object({
   pointCount: z.number().int().nonnegative(), frameCount: z.number().int().nonnegative(), sampleCount: z.number().int().nonnegative(),
+  inputFrameCount: z.number().int().nonnegative().default(0),
+  processedFrameCount: z.number().int().nonnegative().default(0),
+  isolatedFrameCount: z.number().int().nonnegative().default(0),
+  missingFrameCount: z.number().int().nonnegative().default(0),
   stateCounts: ReportStateCountsSchema, validRatio: z.number().min(0).max(1), lostRatio: z.number().min(0).max(1),
   droppedFrameRatio: z.number().min(0).max(1), processingStats: ProcessingStatsSchema
 });
@@ -400,7 +454,7 @@ const ReportCoordinateSchema = PointSchema.nullable();
 const ReportRangeSchema = z.object({ min: z.number().finite(), max: z.number().finite() }).nullable();
 const ReportPointSchema = z.object({
   pointId: z.string().min(1), groupId: z.string().min(1).nullable(), model: FeatureModelTypeSchema.nullable(), grade: QualityGradeSchema,
-  finalState: z.enum(["valid", "suspect", "lost", "reviewed", "paused"]).nullable(), sampleCount: z.number().int().nonnegative(),
+  finalState: z.enum(["valid", "provisional", "suspect", "lost", "reviewed", "paused"]).nullable(), sampleCount: z.number().int().nonnegative(),
   stateCounts: ReportStateCountsSchema, validRatio: z.number().min(0).max(1), lostRatio: z.number().min(0).max(1),
   start: ReportCoordinateSchema, end: ReportCoordinateSchema, dx: z.number().finite().nullable(), dy: z.number().finite().nullable(),
   xRange: ReportRangeSchema, yRange: ReportRangeSchema,
@@ -408,15 +462,40 @@ const ReportPointSchema = z.object({
   gatingFailures: z.record(z.number().int().nonnegative()), relocationMethods: z.record(z.number().int().nonnegative())
 });
 const ReportTrackSchema = MultiPointTrackSchema.extend({ residualSemantics: ReportResidualSemanticsSchema });
-const ReportChartSampleSchema = z.object({ pointId: z.string().min(1), frame: z.number().int().nonnegative(), x: z.number().finite(), y: z.number().finite(), dx: z.number().finite().nullable(), dy: z.number().finite().nullable(), confidence: z.number().min(0).max(1), residual: z.number().nonnegative() });
+const ReportChartSampleSchema = z.object({
+  pointId: z.string().min(1), frame: z.number().int().nonnegative(),
+  x: z.number().finite(), y: z.number().finite(), dx: z.number().finite().nullable(), dy: z.number().finite().nullable(),
+  confidence: z.number().min(0).max(1), residual: z.number().nonnegative(), innovationPx: z.number().nonnegative().default(0),
+  flowErrorForwardBackward: z.number().nonnegative().nullable().default(null), ncc: z.number().min(-1).max(1).nullable().default(null),
+  epipolarError: z.number().nonnegative().nullable().default(null), loweRatio: z.number().min(0).max(1).nullable().default(null),
+  state: z.enum(["valid", "provisional", "suspect", "lost", "reviewed", "paused"]).default("valid")
+});
 const ReportRegistrationSchema = z.object({
-  count: z.number().int().nonnegative(), acceptedCount: z.number().int().nonnegative(), rejectedCount: z.number().int().nonnegative(), successRate: z.number().min(0).max(1),
+  count: z.number().int().nonnegative(), acceptedCount: z.number().int().nonnegative(), provisionalCount: z.number().int().nonnegative().default(0), rejectedCount: z.number().int().nonnegative(), successRate: z.number().min(0).max(1),
   meanInlierRatio: z.number().min(0).max(1).nullable(), medianInlierRatio: z.number().min(0).max(1).nullable(), meanReprojectionError: z.number().nonnegative().nullable(), p95ReprojectionError: z.number().nonnegative().nullable(), methodDistribution: z.record(z.number().int().nonnegative())
 });
-const ReportAnomalyIntervalSchema = z.object({ pointId: z.string().min(1), startFrame: z.number().int().nonnegative(), endFrame: z.number().int().nonnegative(), frameCount: z.number().int().positive(), worstState: z.enum(["valid", "suspect", "lost", "reviewed", "paused"]), minimumConfidence: z.number().min(0).max(1), maximumResidual: z.number().nonnegative() });
+const ReportAnomalyIntervalSchema = z.object({ pointId: z.string().min(1), startFrame: z.number().int().nonnegative(), endFrame: z.number().int().nonnegative(), frameCount: z.number().int().positive(), worstState: z.enum(["valid", "provisional", "suspect", "lost", "reviewed", "paused"]), minimumConfidence: z.number().min(0).max(1), maximumResidual: z.number().nonnegative() });
 const ReportKeyFrameSchema = z.object({ pointId: z.string().min(1), frame: z.number().int().nonnegative(), reason: z.enum(["regular", "abnormal-boundary"]), track: ReportTrackSchema });
 
+const MetricSummarySchema = z.object({
+  count: z.number().int().nonnegative(),
+  p50: z.number().finite().nullable(),
+  p95: z.number().finite().nullable(),
+  max: z.number().finite().nullable()
+});
+
+const GroundTruthErrorSchema = z.object({
+  pointId: z.string().min(1),
+  unit: z.string().min(1),
+  count: z.number().int().nonnegative(),
+  biasX: z.number().finite(), biasY: z.number().finite(),
+  maeX: z.number().nonnegative(), maeY: z.number().nonnegative(),
+  rmseX: z.number().nonnegative(), rmseY: z.number().nonnegative(),
+  radialP95: z.number().nonnegative(), radialMax: z.number().nonnegative()
+});
+
 export const ReportModelSchema = z.object({
+  schemaVersion: z.literal(3).default(3),
   metadata: ReportMetadataSchema,
   thresholds: QualityThresholdsSchema,
   options: ReportOptionsSchema,
@@ -431,7 +510,13 @@ export const ReportModelSchema = z.object({
   anomalyIntervals: z.array(ReportAnomalyIntervalSchema),
   risks: z.array(RiskNoticeSchema),
   humanInterventions: z.array(z.record(z.unknown())),
-  keyFrames: z.array(ReportKeyFrameSchema)
+  keyFrames: z.array(ReportKeyFrameSchema),
+  frameLedger: z.array(FrameLedgerEntrySchema).default([]),
+  topology: z.array(PointTopologyEdgeSchema).default([]),
+  calibration: CalibrationScaleSchema.nullable().default(null),
+  groundTruth: z.array(GroundTruthObservationSchema).default([]),
+  internalQuality: z.record(MetricSummarySchema).default({}),
+  groundTruthErrors: z.array(GroundTruthErrorSchema).default([])
 });
 
 export type Roi = z.infer<typeof RoiSchema>;
@@ -461,6 +546,10 @@ export type RecoveryEvent = z.infer<typeof RecoveryEventSchema>;
 export type RiskNotice = z.infer<typeof RiskNoticeSchema>;
 export type CameraSession = z.infer<typeof CameraSessionSchema>;
 export type ProcessingStats = z.infer<typeof ProcessingStatsSchema>;
+export type FrameLedgerEntry = z.infer<typeof FrameLedgerEntrySchema>;
+export type PointTopologyEdge = z.infer<typeof PointTopologyEdgeSchema>;
+export type CalibrationScale = z.infer<typeof CalibrationScaleSchema>;
+export type GroundTruthObservation = z.infer<typeof GroundTruthObservationSchema>;
 
 export type LocalFrame = {
   frame: number;
