@@ -1,4 +1,4 @@
-import type { FrameRegistration, MultiPointTrack, PointSeed } from "@subpixel/contracts";
+import type { FrameRegistration, MultiPointTrack, PointSeed, RefinementGeometry } from "@subpixel/contracts";
 import { validateNaturalMatch } from "./natural-features";
 import { applyLocalAffine, type Anchor } from "./anchor-propagation";
 
@@ -8,6 +8,7 @@ export type MultiPointObservation = {
   refined?: { x: number; y: number };
   confidence: number;
   residual: number;
+  geometry?: RefinementGeometry | null;
   metrics?: { forwardBackwardError?: number; ncc?: number; epipolarError?: number; loweRatio?: number; descriptorDistance?: number };
   relocationMethod?: MultiPointTrack["relocationMethod"];
   predictionSource?: MultiPointTrack["predictionSource"];
@@ -66,7 +67,7 @@ export function createMultiPointTracker(seeds: PointSeed[], options: { pauseLost
       const pointGatePassed = state === "valid";
       if (pointGatePassed && registrationDecision === "provisional") state = "provisional";
       if (pointGatePassed && registrationDecision !== "rejected") previous.set(seed.pointId, refined);
-      return { pointId: seed.pointId, frame, timestampMs, predicted, refined, model: seed.model, confidence: observation?.confidence ?? 0, residual: observation?.residual ?? Infinity, flowErrorForwardBackward: observation?.metrics?.forwardBackwardError ?? null, ncc: observation?.metrics?.ncc ?? null, descriptorDistance: observation?.metrics?.descriptorDistance ?? null, epipolarError: observation?.metrics?.epipolarError ?? null, predictionSource: observation?.predictionSource ?? "previous-position", innovationPx: Math.hypot(refined.x - predicted.x, refined.y - predicted.y), localAffineResidualPx: observation?.localAffineResidualPx ?? null, gateFailures: observation?.gateFailures ?? [], candidateUniqueness: observation?.candidateUniqueness ?? null, registrationDecision, pointGatePassed, topologyErrorPx: null, missingReason: observation ? null : "point-observation-missing", state, relocationMethod: observation?.relocationMethod ?? "none" } satisfies MultiPointTrack;
+      return { pointId: seed.pointId, frame, timestampMs, predicted, refined, model: seed.model, confidence: observation?.confidence ?? 0, residual: observation?.residual ?? Infinity, geometry: observation?.geometry ?? null, flowErrorForwardBackward: observation?.metrics?.forwardBackwardError ?? null, ncc: observation?.metrics?.ncc ?? null, descriptorDistance: observation?.metrics?.descriptorDistance ?? null, epipolarError: observation?.metrics?.epipolarError ?? null, predictionSource: observation?.predictionSource ?? "previous-position", innovationPx: Math.hypot(refined.x - predicted.x, refined.y - predicted.y), localAffineResidualPx: observation?.localAffineResidualPx ?? null, gateFailures: observation?.gateFailures ?? [], candidateUniqueness: observation?.candidateUniqueness ?? null, registrationDecision, pointGatePassed, topologyErrorPx: null, missingReason: observation ? null : "point-observation-missing", state, relocationMethod: observation?.relocationMethod ?? "none" } satisfies MultiPointTrack;
     });
     const hardRegistrationFailure = registrationDecision === "rejected"
       && (registration?.failureClass === "hard-geometry" || registration?.failureClass === "engine-unavailable" || registration?.failureClass === undefined);

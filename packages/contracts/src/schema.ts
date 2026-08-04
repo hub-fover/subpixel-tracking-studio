@@ -158,6 +158,7 @@ export const MultiPointTrackSchema = z.object({
   model: FeatureModelTypeSchema,
   confidence: z.number().min(0).max(1),
   residual: z.number().nonnegative(),
+  geometry: RefinementGeometrySchema.nullable().optional(),
   residualSemantics: z.enum([
     "geometric-fit-error-px",
     "line-intersection-fit-error-px",

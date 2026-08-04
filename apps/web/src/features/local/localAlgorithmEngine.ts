@@ -147,7 +147,10 @@ export class LocalAlgorithmEngine {
         let relocationMethod: MultiPointTrack["relocationMethod"] = predictionSource === "local-affine" ? "local-affine" : "local-correlation";
         let confidence = Math.max(0, Math.min(1, (match.ncc + 1) / 2));
         let residual = match.residual;
-        let gateFailures: string[] = localGuidance.failure ? [localGuidance.failure] : [];
+        let geometry: FeatureRefinement["geometry"] = null;
+        // A rejected local affine is only a propagation fallback. The point may still be
+        // valid when global prediction and its own current-frame identity gates pass.
+        let gateFailures: string[] = [];
         let candidateUniqueness: number | null = null;
         if (seed.model === "natural-keypoint" && match.ncc < .7) {
           const size = imageDimensions(frame.image);
@@ -187,6 +190,7 @@ export class LocalAlgorithmEngine {
           refined = modelResult.point;
           confidence = modelResult.confidence;
           residual = modelResult.residualPx ?? match.residual;
+          geometry = modelResult.geometry;
           relocationMethod = "feature-refine";
           candidateUniqueness = modelResult.geometry?.kind === "corner" ? modelResult.geometry.uniquenessRatio : null;
         }
@@ -210,7 +214,7 @@ export class LocalAlgorithmEngine {
             context.previousSearches.set(seed.pointId, { patch: extractNativePatch(frame.image, acceptedRoi), roi: acceptedRoi });
           }
         }
-        observations.push({ pointId: seed.pointId, predicted, refined, confidence, residual, relocationMethod, predictionSource, localAffineResidualPx: localPrediction?.residual ?? null, gateFailures, candidateUniqueness, metrics: seed.model === "natural-keypoint" ? { forwardBackwardError: forwardBackwardError ?? Infinity, ncc: match.ncc, epipolarError, loweRatio: descriptor?.loweRatio, descriptorDistance: descriptor?.distance } : undefined });
+        observations.push({ pointId: seed.pointId, predicted, refined, confidence, residual, geometry, relocationMethod, predictionSource, localAffineResidualPx: localPrediction?.residual ?? null, gateFailures, candidateUniqueness, metrics: seed.model === "natural-keypoint" ? { forwardBackwardError: forwardBackwardError ?? Infinity, ncc: match.ncc, epipolarError, loweRatio: descriptor?.loweRatio, descriptorDistance: descriptor?.distance } : undefined });
       } catch { /* The tracker records this point as lost. */ }
     }
     return context.tracker.process(observations, frame.timestampMs, context.registration, context.runMode === "offline"

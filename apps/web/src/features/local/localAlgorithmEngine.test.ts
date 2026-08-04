@@ -134,7 +134,7 @@ describe("LocalAlgorithmEngine natural relocation", () => {
     expect(result.tracks[0].predictionSource).toBe("local-affine");
   });
 
-  it("marks a point suspect when nearby scene anchors produce a degenerate local affine", () => {
+  it("falls back to global prediction when nearby scene anchors produce a degenerate local affine", () => {
     installCanvasReader();
     const cooperativeSeed: PointSeed = { ...seed, model: "blob", intent: "blob-center" };
     const current = featureSource(160, 80, { x: 40, y: 30 });
@@ -149,8 +149,9 @@ describe("LocalAlgorithmEngine natural relocation", () => {
       }
     });
 
-    expect(result.tracks[0].state).toBe("suspect");
-    expect(result.tracks[0].gateFailures).toContain("tracking.local-affine-degenerate");
+    expect(result.tracks[0].state).toBe("valid");
+    expect(result.tracks[0].predictionSource).toBe("reference-homography");
+    expect(result.tracks[0].gateFailures).not.toContain("tracking.local-affine-degenerate");
   });
 
   it("runs the cooperative model refinement on the current native ROI", () => {
@@ -160,9 +161,10 @@ describe("LocalAlgorithmEngine natural relocation", () => {
     const current = featureSource(120, 80, { x: 25, y: 30 });
     const template = nativePatch(reference, cooperativeSeed.roi);
     const tracker = createMultiPointTracker([cooperativeSeed]); tracker.initialize();
+    const geometry = { kind: "ellipse" as const, center: { x: 25.25, y: 30.125 }, majorAxis: 12, minorAxis: 10, angleDeg: 4, edgeCoverage: .9, inlierCount: 48 };
     const refineFeature = vi.fn((_patch, intent, roi) => ({
       accepted: true, intent, roi, point: { x: 25.25, y: 30.125 }, confidence: .95,
-      residualPx: .08, gates: { signal: true }, reason: null, geometry: null
+      residualPx: .08, gates: { signal: true }, reason: null, geometry
     }));
     const engine = new LocalAlgorithmEngine({ relocateNaturalDescriptor: () => null, refineFeature } as never);
     const result = engine.track(frame(current, 1), [cooperativeSeed], {
@@ -173,7 +175,7 @@ describe("LocalAlgorithmEngine natural relocation", () => {
     });
 
     expect(refineFeature).toHaveBeenCalledOnce();
-    expect(result.tracks[0]).toMatchObject({ refined: { x: 25.25, y: 30.125 }, relocationMethod: "feature-refine" });
+    expect(result.tracks[0]).toMatchObject({ refined: { x: 25.25, y: 30.125 }, geometry, relocationMethod: "feature-refine" });
   });
 
   it("rejects a high-NCC cooperative candidate when current-frame geometry is ambiguous", () => {

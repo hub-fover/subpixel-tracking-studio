@@ -42,13 +42,31 @@ export function flattenTracks(state: PointSetState): MultiPointTrack[] {
   return [...state.tracksByPoint.values()].flat().sort((a, b) => a.frame - b.frame || a.pointId.localeCompare(b.pointId));
 }
 
+export function recountFrameLedger(state: PointSetState, frame: number): PointSetState {
+  const observations = [...state.tracksByPoint.values()].flatMap(tracks => tracks.filter(track => track.frame === frame));
+  const validCount = observations.filter(track => track.state === "valid" || track.state === "reviewed").length;
+  const provisionalCount = observations.filter(track => track.state === "provisional").length;
+  const suspectCount = observations.filter(track => track.state === "suspect").length;
+  const missingCount = observations.filter(track => track.state === "lost" || track.state === "paused").length;
+  return { ...state, frameLedger: state.frameLedger.map(entry => entry.frame === frame ? { ...entry, validCount, provisionalCount, suspectCount, missingCount } : entry) };
+}
+
 export function reviewTrack(state: PointSetState, pointId: string, frame: number): PointSetState {
   const tracks = state.tracksByPoint.get(pointId);
   if (!tracks?.some(track => track.frame === frame && track.state !== "reviewed")) return state;
 
   const tracksByPoint = new Map(state.tracksByPoint);
   tracksByPoint.set(pointId, tracks.map(track => track.frame === frame ? { ...track, state: "reviewed" as const } : track));
-  return { ...state, tracksByPoint };
+  return recountFrameLedger({ ...state, tracksByPoint }, frame);
+}
+
+export function setTrackReviewDecision(state: PointSetState, pointId: string, frame: number, decision: "accept" | "reject"): PointSetState {
+  const tracks = state.tracksByPoint.get(pointId);
+  if (!tracks?.some(track => track.frame === frame)) return state;
+  const nextState = decision === "accept" ? "reviewed" as const : "suspect" as const;
+  const tracksByPoint = new Map(state.tracksByPoint);
+  tracksByPoint.set(pointId, tracks.map(track => track.frame === frame ? { ...track, state: nextState } : track));
+  return recountFrameLedger({ ...state, tracksByPoint }, frame);
 }
 
 export function appendRegistration(state: PointSetState, registration: FrameRegistration): PointSetState {
@@ -81,7 +99,7 @@ export function clonePointSetState(state: PointSetState): PointSetState {
       quality: seed.quality ? { ...seed.quality, gates: { ...seed.quality.gates } } : undefined,
       template: seed.template ? { ...seed.template, descriptor: [...seed.template.descriptor], gradientTemplate: [...seed.template.gradientTemplate], topology: [...seed.template.topology] } : undefined
     })),
-    tracksByPoint: new Map([...state.tracksByPoint].map(([pointId, tracks]) => [pointId, tracks.map(track => ({ ...track, predicted: { ...track.predicted }, refined: { ...track.refined }, gateFailures: [...track.gateFailures] }))])),
+    tracksByPoint: new Map([...state.tracksByPoint].map(([pointId, tracks]) => [pointId, tracks.map(track => ({ ...track, predicted: { ...track.predicted }, refined: { ...track.refined }, geometry: track.geometry ? structuredClone(track.geometry) : track.geometry, gateFailures: [...track.gateFailures] }))])),
     registrations: state.registrations.map(registration => ({ ...registration, transform: registration.transform ? { ...registration.transform, matrix: [...registration.transform.matrix] } : undefined, inverseTransform: registration.inverseTransform ? { ...registration.inverseTransform, matrix: [...registration.inverseTransform.matrix] } : undefined, fundamentalMatrix: registration.fundamentalMatrix ? [...registration.fundamentalMatrix] : undefined })),
     recoveryEvents: state.recoveryEvents.map(event => ({ ...event })),
     activePointIds: [...state.activePointIds],

@@ -51,11 +51,39 @@ test("a real circular target can be refined and confirmed", async ({ page }) => 
   await confirm.click();
   await expect(page.locator('.seed-row strong', { hasText: "p-001" })).toBeVisible();
   await expect(page.locator('[data-point-id="p-001"]').first()).toBeVisible();
+  await expect(page.locator(".roi-overlay ellipse.overlay-geometry")).toBeVisible();
+  await expect(page.locator('.roi-overlay text', { hasText: "p-001" })).toBeVisible();
+});
+
+test("natural feature selection exposes candidate quality guidance", async ({ page }) => {
+  await page.goto("/"); await importSample(page); await page.getByLabel("提取类型").selectOption("natural-keypoint");
+  await expect(page.getByText("自然特征候选引导")).toBeVisible();
+  await expect(page.getByText("候选通过三项门控后方可确认")).toBeVisible();
+});
+
+test("camera annotation freezes one native frame and confirms a feature", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator.mediaDevices, "getUserMedia", { configurable: true, value: async () => {
+      const canvas = document.createElement("canvas"); canvas.width = 640; canvas.height = 480;
+      const context = canvas.getContext("2d")!;
+      const draw = () => { context.fillStyle = "#f4f4f4"; context.fillRect(0, 0, 640, 480); context.fillStyle = "#111"; context.beginPath(); context.arc(320, 240, 54, 0, Math.PI * 2); context.fill(); };
+      draw(); window.setInterval(draw, 100);
+      return canvas.captureStream(10);
+    } });
+  });
+  await page.goto("/"); await page.getByRole("button", { name: "打开相机" }).click();
+  await expect(page.getByText(/原生帧 640 × 480/)).toBeVisible({ timeout: 10_000 });
+  await page.getByLabel("提取类型").selectOption("circle-center");
+  await dragRoi(page, { x: .36, y: .3 }, { x: .64, y: .7 });
+  await expect(page.locator(".draft-ready")).toBeVisible({ timeout: 10_000 });
+  await page.getByRole("button", { name: "确认点" }).click();
+  await expect(page.locator('.seed-row strong', { hasText: "p-001" })).toBeVisible();
+  await expect(page.locator(".roi-overlay ellipse.overlay-geometry")).toBeVisible();
 });
 
 test("an unwanted ROI can be deleted before entering the point set", async ({ page }) => {
   await page.goto("/"); await importSample(page); await dragRoi(page, { x: .01, y: .01 }, { x: .15, y: .15 }); await expect(page.locator(".draft-state")).toBeVisible();
-  await page.getByRole("button", { name: "删除草稿" }).click(); await expect(page.locator(".seed-row")).toHaveCount(0); await expect(page.locator(".draft-state")).toHaveCount(0);
+  await page.getByRole("button", { name: "取消草稿" }).click(); await expect(page.locator(".seed-row")).toHaveCount(0); await expect(page.locator(".draft-state")).toHaveCount(0);
 });
 
 test("view zoom changes CSS display only and preserves native ROI coordinates", async ({ page }) => {
@@ -119,15 +147,30 @@ test("Z1 offline replay attempts all 10 inputs and exposes engineering charts", 
   }
   await expect(page.getByTestId("frame-progress")).toContainText("输入/已处理 10/10", { timeout: 60_000 });
 
-  const reviewButton = page.getByRole("button", { name: /复核 p-001/ }).first();
-  await expect(reviewButton).toBeVisible();
-  const reviewRow = reviewButton.locator("xpath=ancestor::tr");
-  const reviewedFrame = await reviewRow.getAttribute("data-frame");
-  expect(reviewedFrame).not.toBeNull();
-  await reviewButton.click();
-  const reviewedRow = page.locator(`tr[data-point-id="p-001"][data-frame="${reviewedFrame}"]`);
-  await expect(reviewedRow.locator(".state-reviewed")).toHaveText("已复核");
-  await expect(reviewedRow.getByText("已复核", { exact: true })).toHaveCount(2);
+  await expect(page.getByRole("tab", { name: "复核" })).toHaveAttribute("aria-selected", "true");
+  const reviewWorkspace = page.getByTestId("frame-review-workspace");
+  await expect(reviewWorkspace).toContainText("第 10 / 10 帧");
+  await expect(page.locator('.roi-overlay text', { hasText: "p-001" })).toBeVisible();
+  await page.getByRole("button", { name: "上一帧" }).click();
+  await expect(reviewWorkspace).toContainText("第 9 / 10 帧");
+  await expect(page.locator('.canvas-shell')).toHaveAttribute("data-review-frame", "8");
+  await expect(page.getByRole("button", { name: "选择点 p-001" })).toBeVisible();
+  await page.getByRole("button", { name: "选择点 p-001" }).click();
+  await expect(page.getByRole("button", { name: "确认 p-001 正确" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "标记 p-001 异常" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "重新定位 p-001" })).toBeVisible();
+  await page.getByRole("button", { name: "确认 p-001 正确" }).click();
+  await expect(page.getByTestId("point-review-panel")).toContainText("已复核");
+  await page.getByRole("button", { name: "重新定位 p-001" }).click();
+  await expect(page.getByRole("heading", { name: "重新定位 p-001" })).toBeVisible();
+  await expect(page.locator(".overlay-roi")).toBeVisible();
+  await expect(page.getByText("p-001", { exact: true })).not.toHaveCount(0);
+  await expect(page.locator(".draft-ready")).toBeVisible({ timeout: 20_000 });
+  await page.getByRole("button", { name: "确认重新定位" }).click();
+  await expect(page.getByRole("tab", { name: "复核" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByTestId("point-review-panel")).toContainText("已复核");
+  await expect(page.locator(".seed-row")).toHaveCount(1);
+  if (process.env.WORKBENCH_QA_SCREENSHOT) await page.screenshot({ path: process.env.WORKBENCH_QA_SCREENSHOT, fullPage: false });
 
   await page.getByRole("button", { name: "报告" }).click();
   const dialog = page.getByRole("dialog", { name: "报告中心" });
