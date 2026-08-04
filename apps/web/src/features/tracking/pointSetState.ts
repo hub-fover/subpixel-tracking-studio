@@ -42,6 +42,15 @@ export function flattenTracks(state: PointSetState): MultiPointTrack[] {
   return [...state.tracksByPoint.values()].flat().sort((a, b) => a.frame - b.frame || a.pointId.localeCompare(b.pointId));
 }
 
+export function reviewTrack(state: PointSetState, pointId: string, frame: number): PointSetState {
+  const tracks = state.tracksByPoint.get(pointId);
+  if (!tracks?.some(track => track.frame === frame && track.state !== "reviewed")) return state;
+
+  const tracksByPoint = new Map(state.tracksByPoint);
+  tracksByPoint.set(pointId, tracks.map(track => track.frame === frame ? { ...track, state: "reviewed" as const } : track));
+  return { ...state, tracksByPoint };
+}
+
 export function appendRegistration(state: PointSetState, registration: FrameRegistration): PointSetState {
   return { ...state, registrations: [...state.registrations.filter(item => item.frame !== registration.frame), registration].sort((a, b) => a.frame - b.frame) };
 }

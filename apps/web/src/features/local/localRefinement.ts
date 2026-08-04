@@ -1,7 +1,7 @@
 import { featureModels, snapCooperativeCenter, type GrayPatch } from "@subpixel/algorithms";
 import type { ExtractionIntent, FeatureRefinement, Point, RefinementGeometry, Roi } from "@subpixel/contracts";
 
-type EdgePoint = { x: number; y: number; magnitude: number; angle: number };
+type EdgePoint = { x: number; y: number; magnitude: number; angle: number; gx?: number; gy?: number };
 type CenterComponent = { center: Point; boundary: EdgePoint[] };
 type CircleCandidate = CenterComponent & { score: number; distanceFromRoiCenter: number; major: number; minor: number };
 type OpenCvRefinement = { Mat: new (...args: any[]) => any; matFromArray?: (...args: any[]) => any; fitEllipse?: (points: any) => any; fitEllipseAMS?: (points: any) => any; cornerSubPix?: (...args: any[]) => any; Size?: new (width: number, height: number) => any; TermCriteria?: new (...args: any[]) => any; CV_32FC2?: number; TERM_CRITERIA_EPS?: number; TERM_CRITERIA_MAX_ITER?: number; [key: string]: any };
@@ -12,16 +12,26 @@ function openCv(): OpenCvRefinement | undefined {
 }
 
 function edges(patch: GrayPatch): EdgePoint[] {
-  const values: EdgePoint[] = [];
+  const values: EdgePoint[] = []; const magnitudeField = new Float32Array(patch.width * patch.height); const gradientX = new Float32Array(patch.width * patch.height); const gradientY = new Float32Array(patch.width * patch.height);
   for (let y = 1; y < patch.height - 1; y += 1) for (let x = 1; x < patch.width - 1; x += 1) {
     const gx = patch.data[y * patch.width + x + 1] - patch.data[y * patch.width + x - 1];
     const gy = patch.data[(y + 1) * patch.width + x] - patch.data[(y - 1) * patch.width + x];
-    const magnitude = Math.hypot(gx, gy);
-    if (magnitude > 0) values.push({ x, y, magnitude, angle: (Math.atan2(gy, gx) * 180 / Math.PI + 180) % 180 });
+    const magnitude = Math.hypot(gx, gy); const index = y * patch.width + x; magnitudeField[index] = magnitude; gradientX[index] = gx; gradientY[index] = gy;
+    if (magnitude > 0) values.push({ x, y, magnitude, angle: (Math.atan2(gy, gx) * 180 / Math.PI + 180) % 180, gx, gy });
   }
   const sorted = values.map(item => item.magnitude).sort((a, b) => a - b);
   const threshold = sorted[Math.floor(sorted.length * .72)] ?? Infinity;
-  return values.filter(item => item.magnitude >= threshold);
+  const sampleMagnitude = (x: number, y: number) => {
+    const x0 = Math.max(0, Math.min(patch.width - 2, Math.floor(x))); const y0 = Math.max(0, Math.min(patch.height - 2, Math.floor(y))); const fx = x - x0; const fy = y - y0;
+    const top = magnitudeField[y0 * patch.width + x0] * (1 - fx) + magnitudeField[y0 * patch.width + x0 + 1] * fx; const bottom = magnitudeField[(y0 + 1) * patch.width + x0] * (1 - fx) + magnitudeField[(y0 + 1) * patch.width + x0 + 1] * fx;
+    return top * (1 - fy) + bottom * fy;
+  };
+  return values.filter(item => item.magnitude >= threshold).map(item => {
+    const index = Math.round(item.y) * patch.width + Math.round(item.x); const nx = gradientX[index] / item.magnitude; const ny = gradientY[index] / item.magnitude;
+    const before = sampleMagnitude(item.x - nx, item.y - ny); const after = sampleMagnitude(item.x + nx, item.y + ny); const curvature = before - 2 * item.magnitude + after;
+    const offset = Math.abs(curvature) > 1e-6 ? Math.max(-.75, Math.min(.75, .5 * (before - after) / curvature)) : 0;
+    return { ...item, x: item.x + nx * offset, y: item.y + ny * offset };
+  });
 }
 
 function centeredComponent(patch: GrayPatch): CenterComponent | undefined {
@@ -212,6 +222,32 @@ function estimateEllipseFromEdges(edgePoints: EdgePoint[], center: Point) {
   };
 }
 
+function refineRadialCenter(patch: GrayPatch, initialCenter: Point, ellipse: { major: number; minor: number; angleDeg: number }) {
+  const sampleIntensity = (x: number, y: number) => {
+    const x0 = Math.floor(x); const y0 = Math.floor(y); if (x0 < 0 || y0 < 0 || x0 >= patch.width - 1 || y0 >= patch.height - 1) return NaN;
+    const fx = x - x0; const fy = y - y0; const top = patch.data[y0 * patch.width + x0] * (1 - fx) + patch.data[y0 * patch.width + x0 + 1] * fx; const bottom = patch.data[(y0 + 1) * patch.width + x0] * (1 - fx) + patch.data[(y0 + 1) * patch.width + x0 + 1] * fx; return top * (1 - fy) + bottom * fy;
+  };
+  let center = { ...initialCenter }; const angleCount = 128; const radiusSamples = 64; const ellipseAngle = ellipse.angleDeg * Math.PI / 180; const a = Math.max(ellipse.major / 2, 2); const b = Math.max(ellipse.minor / 2, 2);
+  for (let iteration = 0; iteration < 4; iteration += 1) {
+    const points: Array<{ point: Point; strength: number } | undefined> = [];
+    for (let index = 0; index < angleCount; index += 1) {
+      const phi = index * Math.PI * 2 / angleCount; const relative = phi - ellipseAngle; const expected = a * b / Math.max(1e-6, Math.sqrt((b * Math.cos(relative)) ** 2 + (a * Math.sin(relative)) ** 2)); const start = expected * .86; const end = expected * 1.30; const step = (end - start) / (radiusSamples - 1); const profile = new Float64Array(radiusSamples); let valid = true;
+      for (let sample = 0; sample < radiusSamples; sample += 1) { const radius = start + sample * step; const value = sampleIntensity(center.x + radius * Math.cos(phi), center.y + radius * Math.sin(phi)); if (!Number.isFinite(value)) { valid = false; break; } profile[sample] = value; }
+      if (!valid) { points.push(undefined); continue; }
+      let peak = -1; let peakStrength = -Infinity; const gradients = new Float64Array(radiusSamples);
+      for (let sample = 1; sample < radiusSamples - 1; sample += 1) { gradients[sample] = Math.abs(profile[sample - 1] - profile[sample + 1]); if (gradients[sample] >= peakStrength) { peak = sample; peakStrength = gradients[sample]; } }
+      if (peak < 2 || peak >= radiusSamples - 2 || peakStrength < 2) { points.push(undefined); continue; }
+      const before = gradients[peak - 1]; const current = gradients[peak]; const after = gradients[peak + 1]; const curvature = before - 2 * current + after; const offset = Math.abs(curvature) > 1e-9 ? Math.max(-.75, Math.min(.75, .5 * (before - after) / curvature)) : 0; const radius = start + (peak + offset) * step;
+      points.push({ point: { x: center.x + radius * Math.cos(phi), y: center.y + radius * Math.sin(phi) }, strength: peakStrength });
+    }
+    let xSum = 0; let ySum = 0; let weightSum = 0; let pairCount = 0;
+    for (let index = 0; index < angleCount / 2; index += 1) { const first = points[index]; const opposite = points[index + angleCount / 2]; if (!first || !opposite) continue; const weight = Math.min(first.strength, opposite.strength); xSum += (first.point.x + opposite.point.x) * .5 * weight; ySum += (first.point.y + opposite.point.y) * .5 * weight; weightSum += weight; pairCount += 1; }
+    if (pairCount < angleCount * .3 || weightSum <= 0) return undefined;
+    const next = { x: xSum / weightSum, y: ySum / weightSum }; if (Math.hypot(next.x - initialCenter.x, next.y - initialCenter.y) > Math.max(2, b * .12)) return undefined; center = next;
+  }
+  return center;
+}
+
 function emptyResult(intent: ExtractionIntent, roi: Roi, reason: string): FeatureRefinement {
   return { accepted: false, intent, roi, point: null, confidence: 0, residualPx: null, gates: { candidate: false }, reason, geometry: null };
 }
@@ -229,10 +265,12 @@ function circleRefinement(patch: GrayPatch, intent: ExtractionIntent, roi: Roi):
       const points = cv.matFromArray ? cv.matFromArray(edgePoints.length, 1, cv.CV_32FC2 ?? 13, values) : new cv.Mat(edgePoints.length, 1, cv.CV_32FC2 ?? 13);
       if (!cv.matFromArray) points.data32F.set(values);
       const ellipse = (cv.fitEllipseAMS ?? cv.fitEllipse)!(points);
-      const center = { x: Number(ellipse.center.x), y: Number(ellipse.center.y) };
+      let center = { x: Number(ellipse.center.x), y: Number(ellipse.center.y) };
       const ellipseWidth = Number(ellipse.size.width); const ellipseHeight = Number(ellipse.size.height);
       const major = Math.max(ellipseWidth, ellipseHeight); const minor = Math.min(ellipseWidth, ellipseHeight);
       const angle = (Number(ellipse.angle) || 0) + (ellipseWidth < ellipseHeight ? 90 : 0);
+      const radialCenter = refineRadialCenter(patch, center, { major, minor, angleDeg: angle }); const initialResidual = ellipseEdgeResidual(edgePoints, center, major, minor, angle);
+      if (radialCenter && Math.hypot(radialCenter.x - center.x, radialCenter.y - center.y) <= .35 && ellipseEdgeResidual(edgePoints, radialCenter, major, minor, angle) < initialResidual) center = radialCenter;
       const residual = ellipseEdgeResidual(edgePoints, center, major, minor, angle);
       const bins = new Set(edgePoints.map(edge => Math.floor(Math.atan2(edge.y - center.y, edge.x - center.x) * 18 / Math.PI + 18) % 36)); const edgeCoverage = bins.size / 36;
       const touchesBoundary = edgePoints.some(edge => edge.x <= 1 || edge.y <= 1 || edge.x >= patch.width - 2 || edge.y >= patch.height - 2); const gates = { edgeCoverage: edgeCoverage >= .6, edgePoints: edgePoints.length >= 32, axisRatio: minor / Math.max(major, 1e-9) >= .15, residual: residual <= Math.max(.75, .02 * minor), roiBoundary: !touchesBoundary };
@@ -244,8 +282,11 @@ function circleRefinement(patch: GrayPatch, intent: ExtractionIntent, roi: Roi):
     }
   }
   const snapped = component ? undefined : snapCooperativeCenter(patch, "circle");
-  const center = component?.center ?? { x: snapped!.x, y: snapped!.y };
-  const ellipse = estimateEllipseFromEdges(edgePoints, center);
+  let center = component?.center ?? { x: snapped!.x, y: snapped!.y };
+  let ellipse = estimateEllipseFromEdges(edgePoints, center);
+  const radialCenter = refineRadialCenter(patch, center, ellipse); const initialResidual = ellipseEdgeResidual(edgePoints, center, ellipse.major, ellipse.minor, ellipse.angleDeg);
+  if (radialCenter && Math.hypot(radialCenter.x - center.x, radialCenter.y - center.y) <= .35 && ellipseEdgeResidual(edgePoints, radialCenter, ellipse.major, ellipse.minor, ellipse.angleDeg) < initialResidual) center = radialCenter;
+  ellipse = estimateEllipseFromEdges(edgePoints, center);
   const residual = ellipseEdgeResidual(edgePoints, center, ellipse.major, ellipse.minor, ellipse.angleDeg);
   const bins = new Set(edgePoints.map(edge => Math.floor(Math.atan2(edge.y - center.y, edge.x - center.x) * 18 / Math.PI + 18) % 36));
   const edgeCoverage = bins.size / 36;
@@ -258,29 +299,133 @@ function circleRefinement(patch: GrayPatch, intent: ExtractionIntent, roi: Roi):
   return { accepted, intent, roi, point: accepted ? point : null, confidence: Math.max(0, Math.min(1, edgeCoverage * Math.exp(-residual))), residualPx: residual, gates, reason: accepted ? null : Object.entries(gates).find(([, value]) => !value)?.[0] ?? "refinement.low-confidence", geometry };
 }
 
-function lineRefinement(patch: GrayPatch, intent: ExtractionIntent, roi: Roi, diagonal: boolean): FeatureRefinement {
+function angleDistance(left: number, right: number) {
+  const difference = Math.abs(left - right) % 180;
+  return Math.min(difference, 180 - difference);
+}
+
+function refineNormalAngleHough(edgePoints: EdgePoint[], peakAngleDeg: number) {
+  const stride = Math.max(1, Math.ceil(edgePoints.length / 6000)); const sampled = edgePoints.filter((_, index) => index % stride === 0);
+  let bestAngle = peakAngleDeg; let bestScore = -Infinity;
+  for (let step = -60; step <= 60; step += 1) {
+    const candidate = (peakAngleDeg + step * .25 + 180) % 180; const radians = candidate * Math.PI / 180; const nx = Math.cos(radians); const ny = Math.sin(radians); const bins = new Map<number, { positive: number; negative: number }>();
+    for (const edge of sampled) {
+      if (angleDistance(edge.angle, candidate) > 30) continue;
+      const key = Math.round((edge.x * nx + edge.y * ny) * 2); const bin = bins.get(key) ?? { positive: 0, negative: 0 }; const polarity = (edge.gx ?? 0) * nx + (edge.gy ?? 0) * ny;
+      if (polarity >= 0) bin.positive += edge.magnitude; else bin.negative += edge.magnitude; bins.set(key, bin);
+    }
+    const positive = [...bins].map(([key, value]) => ({ key, score: value.positive })).filter(item => item.score > 0).sort((left, right) => right.score - left.score).slice(0, 8); const negative = [...bins].map(([key, value]) => ({ key, score: value.negative })).filter(item => item.score > 0).sort((left, right) => right.score - left.score).slice(0, 8);
+    for (const left of positive) for (const right of negative) {
+      if (Math.abs(left.key - right.key) < 5) continue;
+      const score = Math.min(left.score, right.score) * 2 + Math.max(left.score, right.score);
+      if (score > bestScore) { bestScore = score; bestAngle = candidate; }
+    }
+  }
+  return bestAngle;
+}
+
+function fitDoubleEdgeCenterline(edgePoints: EdgePoint[], normalAngleDeg: number) {
+  const angle = normalAngleDeg * Math.PI / 180; let normal = { x: Math.cos(angle), y: Math.sin(angle) }; let tangent = { x: -normal.y, y: normal.x };
+  const samples = edgePoints.filter(edge => angleDistance(edge.angle, normalAngleDeg) <= 18).map(edge => ({ edge, projection: edge.x * normal.x + edge.y * normal.y, along: edge.x * tangent.x + edge.y * tangent.y, polarity: Math.sign((edge.gx ?? Math.cos(edge.angle * Math.PI / 180) * edge.magnitude) * normal.x + (edge.gy ?? Math.sin(edge.angle * Math.PI / 180) * edge.magnitude) * normal.y) }));
+  if (samples.length < 12) return undefined;
+  const ordered = [...samples].sort((left, right) => left.projection - right.projection);
+  const projectionMinimum = ordered[0].projection; const binSize = .25; const projectionScores = new Float64Array(Math.ceil((ordered.at(-1)!.projection - projectionMinimum) / binSize) + 1);
+  for (const sample of samples) projectionScores[Math.round((sample.projection - projectionMinimum) / binSize)] += sample.edge.magnitude;
+  const smoothedScores = [...projectionScores].map((_, index) => (projectionScores[index - 1] ?? 0) + projectionScores[index] * 2 + (projectionScores[index + 1] ?? 0));
+  const peaks = smoothedScores.map((score, index) => ({ score, projection: projectionMinimum + index * binSize })).filter((peak, index) => peak.score > 0 && peak.score >= (smoothedScores[index - 1] ?? 0) && peak.score >= (smoothedScores[index + 1] ?? 0)).sort((left, right) => right.score - left.score).slice(0, 12);
+  let peakPair: [typeof peaks[number], typeof peaks[number]] | undefined; let peakPairScore = -Infinity;
+  for (let left = 0; left < peaks.length; left += 1) for (let right = left + 1; right < peaks.length; right += 1) {
+    const separation = Math.abs(peaks[left].projection - peaks[right].projection);
+    if (separation < 2.5) continue;
+    const score = Math.min(peaks[left].score, peaks[right].score) * 2 + Math.max(peaks[left].score, peaks[right].score);
+    if (score > peakPairScore) { peakPair = [peaks[left], peaks[right]]; peakPairScore = score; }
+  }
+  const positive = samples.filter(sample => sample.polarity > 0); const negative = samples.filter(sample => sample.polarity < 0);
+  const weightedMedianProjection = (group: typeof samples) => { const sortedGroup = [...group].sort((left, right) => left.projection - right.projection); const halfWeight = sortedGroup.reduce((sum, sample) => sum + sample.edge.magnitude, 0) / 2; let weight = 0; for (const sample of sortedGroup) { weight += sample.edge.magnitude; if (weight >= halfWeight) return sample.projection; } return sortedGroup.at(-1)?.projection ?? NaN; };
+  const polarityPair = positive.length >= 6 && negative.length >= 6 ? [weightedMedianProjection(positive), weightedMedianProjection(negative)] as const : undefined;
+  let low = polarityPair ? Math.min(...polarityPair) : peakPair ? Math.min(peakPair[0].projection, peakPair[1].projection) : ordered[Math.floor(ordered.length * .1)].projection; let high = polarityPair ? Math.max(...polarityPair) : peakPair ? Math.max(peakPair[0].projection, peakPair[1].projection) : ordered[Math.floor(ordered.length * .9)].projection;
+  for (let iteration = 0; iteration < 12; iteration += 1) {
+    let lowSum = 0; let lowWeight = 0; let highSum = 0; let highWeight = 0;
+    const assignmentGate = Math.max(1.25, Math.abs(high - low) * .35);
+    for (const sample of samples) {
+      const lowDistance = Math.abs(sample.projection - low); const highDistance = Math.abs(sample.projection - high);
+      if (Math.min(lowDistance, highDistance) > assignmentGate) continue;
+      if (lowDistance <= highDistance) { lowSum += sample.projection * sample.edge.magnitude; lowWeight += sample.edge.magnitude; }
+      else { highSum += sample.projection * sample.edge.magnitude; highWeight += sample.edge.magnitude; }
+    }
+    if (lowWeight <= 0 || highWeight <= 0) return undefined;
+    low = lowSum / lowWeight; high = highSum / highWeight;
+  }
+  if (low > high) [low, high] = [high, low];
+  const finalAssignmentGate = Math.max(1.25, Math.abs(high - low) * .35); const fittedSamples = samples.filter(sample => Math.min(Math.abs(sample.projection - low), Math.abs(sample.projection - high)) <= finalAssignmentGate);
+  let residuals = fittedSamples.map(sample => Math.min(Math.abs(sample.projection - low), Math.abs(sample.projection - high))).sort((left, right) => left - right);
+  let residual = residuals[Math.floor(residuals.length * .5)] ?? Infinity;
+  let inliers = fittedSamples.filter(sample => Math.min(Math.abs(sample.projection - low), Math.abs(sample.projection - high)) <= Math.max(1.5, residual * 3));
+  if (inliers.length < 12) return undefined;
+  const lowerGroup = inliers.filter(sample => Math.abs(sample.projection - low) <= Math.abs(sample.projection - high)); const upperGroup = inliers.filter(sample => Math.abs(sample.projection - low) > Math.abs(sample.projection - high));
+  if (lowerGroup.length >= 6 && upperGroup.length >= 6) {
+    const centroid = (group: typeof inliers) => { const weight = group.reduce((sum, sample) => sum + sample.edge.magnitude, 0); return { x: group.reduce((sum, sample) => sum + sample.edge.x * sample.edge.magnitude, 0) / weight, y: group.reduce((sum, sample) => sum + sample.edge.y * sample.edge.magnitude, 0) / weight }; };
+    let xx = 0; let xy = 0; let yy = 0;
+    for (const group of [lowerGroup, upperGroup]) { const center = centroid(group); for (const sample of group) { const dx = sample.edge.x - center.x; const dy = sample.edge.y - center.y; xx += dx * dx * sample.edge.magnitude; xy += dx * dy * sample.edge.magnitude; yy += dy * dy * sample.edge.magnitude; } }
+    const tangentAngle = .5 * Math.atan2(2 * xy, xx - yy); const refinedTangent = { x: Math.cos(tangentAngle), y: Math.sin(tangentAngle) }; let refinedNormal = { x: -refinedTangent.y, y: refinedTangent.x };
+    if (refinedNormal.x * normal.x + refinedNormal.y * normal.y < 0) refinedNormal = { x: -refinedNormal.x, y: -refinedNormal.y };
+    const currentNormalAngle = (Math.atan2(normal.y, normal.x) * 180 / Math.PI + 180) % 180; const refinedNormalAngle = (Math.atan2(refinedNormal.y, refinedNormal.x) * 180 / Math.PI + 180) % 180;
+    if (angleDistance(currentNormalAngle, refinedNormalAngle) <= 2) normal = refinedNormal;
+    tangent = { x: -normal.y, y: normal.x };
+    const weightedOffset = (group: typeof inliers) => group.reduce((sum, sample) => sum + (sample.edge.x * normal.x + sample.edge.y * normal.y) * sample.edge.magnitude, 0) / group.reduce((sum, sample) => sum + sample.edge.magnitude, 0);
+    low = weightedOffset(lowerGroup); high = weightedOffset(upperGroup); if (low > high) [low, high] = [high, low];
+    const refinedGate = Math.max(1.25, Math.abs(high - low) * .35); const refinedSamples = samples.map(sample => ({ ...sample, projection: sample.edge.x * normal.x + sample.edge.y * normal.y, along: sample.edge.x * tangent.x + sample.edge.y * tangent.y })).filter(sample => Math.min(Math.abs(sample.projection - low), Math.abs(sample.projection - high)) <= refinedGate);
+    residuals = refinedSamples.map(sample => Math.min(Math.abs(sample.projection - low), Math.abs(sample.projection - high))).sort((left, right) => left - right); residual = residuals[Math.floor(residuals.length * .5)] ?? Infinity;
+    inliers = refinedSamples.filter(sample => Math.min(Math.abs(sample.projection - low), Math.abs(sample.projection - high)) <= Math.max(1.5, residual * 3));
+  }
+  const along = inliers.map(sample => sample.along); const supportStart = Math.min(...along); const supportEnd = Math.max(...along); const supportLength = supportEnd - supportStart;
+  const widths: number[] = []; const segmentCount = 8;
+  for (let segment = 0; segment < segmentCount; segment += 1) {
+    const start = supportStart + supportLength * segment / segmentCount; const end = supportStart + supportLength * (segment + 1) / segmentCount;
+    const segmentSamples = inliers.filter(sample => sample.along >= start && sample.along <= end); const lower = segmentSamples.filter(sample => sample.projection <= (low + high) / 2); const upper = segmentSamples.filter(sample => sample.projection > (low + high) / 2);
+    if (!lower.length || !upper.length) continue;
+    const weightedMean = (items: typeof segmentSamples) => items.reduce((sum, sample) => sum + sample.projection * sample.edge.magnitude, 0) / items.reduce((sum, sample) => sum + sample.edge.magnitude, 0);
+    widths.push(weightedMean(upper) - weightedMean(lower));
+  }
+  const meanWidth = widths.length ? widths.reduce((sum, width) => sum + width, 0) / widths.length : high - low;
+  const widthCv = widths.length >= 3 && meanWidth > 0 ? Math.sqrt(widths.reduce((sum, width) => sum + (width - meanWidth) ** 2, 0) / widths.length) / meanWidth : 0;
+  return { normal, tangent, offset: (low + high) / 2, residual, supportLength, supportStart, supportEnd, widthCv };
+}
+
+function lineRefinement(patch: GrayPatch, intent: ExtractionIntent, roi: Roi, _diagonal: boolean): FeatureRefinement {
   const edgePoints = edges(patch);
   if (edgePoints.length < 16) return emptyResult(intent, roi, "refinement.line-support");
   const bins = new Array(180).fill(0) as number[];
   for (const edge of edgePoints) bins[Math.round(edge.angle) % 180] += edge.magnitude;
-  const first = bins.indexOf(Math.max(...bins));
+  const smoothed = bins.map((_, index) => {
+    let total = 0; for (let offset = -3; offset <= 3; offset += 1) total += bins[(index + offset + 180) % 180]; return total;
+  });
+  const firstPeak = smoothed.indexOf(Math.max(...smoothed));
   let second = -1;
-  for (let index = 0; index < bins.length; index += 1) {
-    const separation = Math.abs(index - first);
-    if (separation >= 30 && separation <= 150 && (second < 0 || bins[index] > bins[second])) second = index;
+  for (let index = 0; index < smoothed.length; index += 1) {
+    const separation = angleDistance(index, firstPeak);
+    if (separation >= 30 && separation <= 90 && (second < 0 || smoothed[index] > smoothed[second])) second = index;
   }
   if (second < 0) return emptyResult(intent, roi, "refinement.line-angle");
-  const center = { x: patch.width / 2, y: patch.height / 2 };
-  const angleDeg = Math.min(180, Math.abs(first - second));
-  const support = edgePoints.length / Math.max(1, (patch.width - 2) * (patch.height - 2));
-  const gates = { angle: angleDeg >= 30 && angleDeg <= 150, support1: support >= .035, support2: support >= .035, residual: support > 0.05 };
+  const first = refineNormalAngleHough(edgePoints, firstPeak); second = refineNormalAngleHough(edgePoints, second);
+  const firstFit = fitDoubleEdgeCenterline(edgePoints, first); const secondFit = fitDoubleEdgeCenterline(edgePoints, second);
+  if (!firstFit || !secondFit) return emptyResult(intent, roi, "refinement.line-support");
+  const determinant = firstFit.normal.x * secondFit.normal.y - firstFit.normal.y * secondFit.normal.x;
+  if (Math.abs(determinant) < 1e-6) return emptyResult(intent, roi, "refinement.line-angle");
+  const center = { x: (firstFit.offset * secondFit.normal.y - firstFit.normal.y * secondFit.offset) / determinant, y: (firstFit.normal.x * secondFit.offset - firstFit.offset * secondFit.normal.x) / determinant };
+  const angleDeg = angleDistance(first, second); const minimumSupport = Math.hypot(patch.width, patch.height) * .35;
+  const gates = { angle: angleDeg >= 30 && angleDeg <= 150, support1: firstFit.supportLength >= minimumSupport, support2: secondFit.supportLength >= minimumSupport, residual: firstFit.residual <= .75 && secondFit.residual <= .75, width: firstFit.widthCv <= .35 && secondFit.widthCv <= .35, intersection: center.x >= 0 && center.y >= 0 && center.x < patch.width && center.y < patch.height };
   const accepted = Object.values(gates).every(Boolean);
-  const lineAngle = (first + 90) * Math.PI / 180;
-  const secondAngle = (second + 90) * Math.PI / 180;
-  const line = (angle: number) => ({ start: globalPoint(roi, { x: center.x - Math.cos(angle) * patch.width, y: center.y - Math.sin(angle) * patch.width }), end: globalPoint(roi, { x: center.x + Math.cos(angle) * patch.width, y: center.y + Math.sin(angle) * patch.width }) });
-  const geometry: RefinementGeometry = { kind: "lines", line1: line(lineAngle), line2: line(secondAngle), angleDeg, support1: Math.min(1, support * 10), support2: Math.min(1, support * 10), widthCv: null };
+  const line = (fit: NonNullable<typeof firstFit>) => {
+    const centerAlong = center.x * fit.tangent.x + center.y * fit.tangent.y; let startParameter = fit.supportStart - centerAlong; let endParameter = fit.supportEnd - centerAlong;
+    const clipAxis = (coordinate: number, direction: number, maximum: number) => { if (Math.abs(direction) < 1e-9) return; const first = (0 - coordinate) / direction; const second = (maximum - coordinate) / direction; startParameter = Math.max(startParameter, Math.min(first, second)); endParameter = Math.min(endParameter, Math.max(first, second)); };
+    clipAxis(center.x, fit.tangent.x, patch.width); clipAxis(center.y, fit.tangent.y, patch.height);
+    return { start: globalPoint(roi, { x: center.x + fit.tangent.x * startParameter, y: center.y + fit.tangent.y * startParameter }), end: globalPoint(roi, { x: center.x + fit.tangent.x * endParameter, y: center.y + fit.tangent.y * endParameter }) };
+  };
+  const geometry: RefinementGeometry = { kind: "lines", line1: line(firstFit), line2: line(secondFit), angleDeg, support1: Math.min(1, firstFit.supportLength / Math.max(patch.width, patch.height)), support2: Math.min(1, secondFit.supportLength / Math.max(patch.width, patch.height)), widthCv: Math.max(firstFit.widthCv, secondFit.widthCv) };
   const point = globalPoint(roi, center);
-  return { accepted, intent, roi, point: accepted ? point : null, confidence: Math.min(1, support * 12), residualPx: accepted ? .5 : null, gates, reason: accepted ? null : Object.entries(gates).find(([, value]) => !value)?.[0] ?? "refinement.low-confidence", geometry };
+  const residual = Math.max(firstFit.residual, secondFit.residual); const confidence = Math.max(0, Math.min(1, Math.min(firstFit.supportLength, secondFit.supportLength) / Math.max(patch.width, patch.height) * Math.exp(-residual) * (1 - Math.min(.9, Math.max(firstFit.widthCv, secondFit.widthCv)))));
+  return { accepted, intent, roi, point: accepted ? point : null, confidence, residualPx: Number.isFinite(residual) ? residual : null, gates, reason: accepted ? null : Object.entries(gates).find(([, value]) => !value)?.[0] ?? "refinement.low-confidence", geometry };
 }
 
 function shiTomasiResponses(patch: GrayPatch, radius = 2) {

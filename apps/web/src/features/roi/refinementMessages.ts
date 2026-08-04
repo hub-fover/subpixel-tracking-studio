@@ -1,3 +1,5 @@
+import type { ExtractionIntent } from "@subpixel/contracts";
+
 const messages: Record<string, string> = {
   residual: "圆轮廓残差过大。请缩小 ROI，避免包含相邻圆或背景纹理。",
   roiBoundary: "目标轮廓触碰 ROI 边界。请扩大或移动 ROI，让目标四周留出背景。",
@@ -20,7 +22,8 @@ const messages: Record<string, string> = {
   "refinement.low-confidence": "目标对比度或唯一性不足，请重新框选。"
 };
 
-export function refinementReasonMessage(reason: string | null | undefined) {
+export function refinementReasonMessage(reason: string | null | undefined, intent?: ExtractionIntent) {
   if (!reason) return "亚像素精修未通过质量门控，请调整 ROI。";
+  if (reason === "residual" && (intent === "crosshair-center" || intent === "diagonal-center")) return "中心线拟合残差过大，ROI 内可能包含多个交点或背景边缘。请缩小 ROI，仅保留目标交点及其两组边缘。";
   return messages[reason] ?? `亚像素精修未通过：${reason}。请调整 ROI 后重试。`;
 }

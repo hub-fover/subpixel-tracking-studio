@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MultiPointTrack, PointSeed } from "@subpixel/contracts";
-import { appendFrameLedgerEntry, appendRiskNotice, appendTracks, clearRiskNotices, clonePointSetState, createPointSetState, flattenTracks, pointRows, summarizeProcessing } from "./pointSetState";
+import { appendFrameLedgerEntry, appendRiskNotice, appendTracks, clearRiskNotices, clonePointSetState, createPointSetState, flattenTracks, pointRows, reviewTrack, summarizeProcessing } from "./pointSetState";
 
 const seed = (id: string): PointSeed => ({
   pointId: id, click: { x: 10, y: 20 }, snapped: { x: 10, y: 20 }, roi: { x: 0, y: 0, width: 20, height: 20 },
@@ -50,6 +50,20 @@ describe("point set state", () => {
     state = appendTracks(state, [track("p-001", 1), track("p-002", 1), track("p-003", 1)]);
     expect(flattenTracks(state)).toHaveLength(6);
     expect([...state.tracksByPoint.entries()].map(([id, tracks]) => [id, tracks.length])).toEqual([["p-001", 2], ["p-002", 2], ["p-003", 2]]);
+  });
+
+  it("reviews only the requested point observation on the requested frame", () => {
+    let state = createPointSetState([seed("p-001"), seed("p-002")]);
+    state = appendTracks(state, [
+      track("p-001", 2), track("p-002", 2),
+      track("p-001", 3), track("p-002", 3)
+    ]);
+
+    state = reviewTrack(state, "p-001", 3);
+
+    expect(state.tracksByPoint.get("p-001")?.find(item => item.frame === 3)?.state).toBe("reviewed");
+    expect(state.tracksByPoint.get("p-001")?.find(item => item.frame === 2)?.state).toBe("valid");
+    expect(state.tracksByPoint.get("p-002")?.find(item => item.frame === 3)?.state).toBe("valid");
   });
 
   it("keeps one ledger entry for every offline input even when a middle frame is isolated", () => {

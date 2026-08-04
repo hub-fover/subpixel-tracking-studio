@@ -37,6 +37,22 @@ test("accepted ROI can be confirmed and renders a center crosshair", async ({ pa
   await expect(page.locator(".seed-row strong", { hasText: "p-001" })).toBeVisible(); await expect(page.locator(".seed-row")).toHaveCount(1);
 });
 
+test("a real circular target can be refined and confirmed", async ({ page }) => {
+  test.setTimeout(45_000);
+  await page.goto("/");
+  await importSample(page);
+  await page.getByLabel("提取类型").selectOption("circle-center");
+  await dragRoi(page, { x: .225, y: .625 }, { x: .275, y: .675 });
+
+  await expect(page.locator(".draft-ready")).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('[data-testid="refinement-quality"]')).toBeVisible();
+  const confirm = page.getByRole("button", { name: "确认点" });
+  await expect(confirm).toBeEnabled();
+  await confirm.click();
+  await expect(page.locator('.seed-row strong', { hasText: "p-001" })).toBeVisible();
+  await expect(page.locator('[data-point-id="p-001"]').first()).toBeVisible();
+});
+
 test("an unwanted ROI can be deleted before entering the point set", async ({ page }) => {
   await page.goto("/"); await importSample(page); await dragRoi(page, { x: .01, y: .01 }, { x: .15, y: .15 }); await expect(page.locator(".draft-state")).toBeVisible();
   await page.getByRole("button", { name: "删除草稿" }).click(); await expect(page.locator(".seed-row")).toHaveCount(0); await expect(page.locator(".draft-state")).toHaveCount(0);
@@ -91,7 +107,7 @@ test("Z1 offline replay attempts all 10 inputs and exposes engineering charts", 
   await expect(page.locator("canvas.roi-canvas")).toHaveAttribute("width", "1279", { timeout: 15_000 });
   await expect(page.locator("canvas.roi-canvas")).toHaveAttribute("height", "1706");
   await page.getByLabel("提取类型").selectOption("crosshair-center");
-  await dragRoi(page, { x: .43, y: .18 }, { x: .48, y: .25 });
+  await dragRoi(page, { x: 569 / 1279, y: 376 / 1706 }, { x: 596 / 1279, y: 407 / 1706 });
   await expect(page.locator(".draft-ready")).toBeVisible({ timeout: 15_000 });
   await page.getByRole("button", { name: "确认点" }).click();
 
@@ -102,6 +118,16 @@ test("Z1 offline replay attempts all 10 inputs and exposes engineering charts", 
     await page.getByRole("button", { name: "开始跟踪" }).click();
   }
   await expect(page.getByTestId("frame-progress")).toContainText("输入/已处理 10/10", { timeout: 60_000 });
+
+  const reviewButton = page.getByRole("button", { name: /复核 p-001/ }).first();
+  await expect(reviewButton).toBeVisible();
+  const reviewRow = reviewButton.locator("xpath=ancestor::tr");
+  const reviewedFrame = await reviewRow.getAttribute("data-frame");
+  expect(reviewedFrame).not.toBeNull();
+  await reviewButton.click();
+  const reviewedRow = page.locator(`tr[data-point-id="p-001"][data-frame="${reviewedFrame}"]`);
+  await expect(reviewedRow.locator(".state-reviewed")).toHaveText("已复核");
+  await expect(reviewedRow.getByText("已复核", { exact: true })).toHaveCount(2);
 
   await page.getByRole("button", { name: "报告" }).click();
   const dialog = page.getByRole("dialog", { name: "报告中心" });

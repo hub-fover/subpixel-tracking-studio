@@ -7,7 +7,7 @@ import { TrackingWorkbench } from "./features/tracking/TrackingWorkbench";
 import { exportTracking, type ExportFormat, type ExportOptions, type ExportResult } from "./features/report/exportClient";
 import { confirmFeatureDraft, intentToModel, nextPointId } from "./features/roi/pointState";
 import { normalizeNativeRoi, type CanvasMode } from "./features/roi/RoiCanvas";
-import { appendFrameLedgerEntry, appendRecoveryEvent, appendRegistration, appendRiskNotice, appendTracks, clearRiskNotices, clonePointSetState, createPointSetState, flattenTracks, summarizeProcessing, type PointSetState } from "./features/tracking/pointSetState";
+import { appendFrameLedgerEntry, appendRecoveryEvent, appendRegistration, appendRiskNotice, appendTracks, clearRiskNotices, clonePointSetState, createPointSetState, flattenTracks, reviewTrack, summarizeProcessing, type PointSetState } from "./features/tracking/pointSetState";
 import { extractNativePatch } from "./features/local/frameUtils";
 import { LocalAlgorithmEngine, type BrowserFrame, type LocalSearchRegion } from "./features/local/localAlgorithmEngine";
 import { LocalWorkerClient } from "./features/local/localWorkerClient";
@@ -587,9 +587,9 @@ export function App() {
       onConfirmDraft={confirmDraft} onDeleteDraft={deleteDraft} onDeleteSeed={deleteSeed}
       onReinitialize={reinitialize} onUndoDelete={undoDelete} canUndoDelete={Boolean(deletedSeed)}
       mode={mode} onModeChange={setMode} seeds={pointState.seeds} multiTracks={latestTracks}
-      tracks={legacyTracks} events={events} running={running} onToggle={toggleTracking}
+      tracks={flattenTracks(pointState)} events={events} running={running} onToggle={toggleTracking}
       onFiles={selectFiles} onExport={exportResult}
-      onReview={frame => setLegacyTracks(current => current.map(track => track.frame === frame ? { ...track, state: "reviewed" } : track))}
+      onReview={(pointId, frame) => setPointState(state => reviewTrack(state, pointId, frame))}
       recoveryPaused={recoveryPaused} recoveryUndoAvailable={recoveryUndoAvailable}
       onApplyRecovery={applyRecovery} onRollbackRecovery={rollbackRecovery}
       onOpenCamera={() => void openCamera()} cameraActive={cameraActive} cameraSession={cameraSession}
