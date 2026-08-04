@@ -248,6 +248,81 @@ function refineRadialCenter(patch: GrayPatch, initialCenter: Point, ellipse: { m
   return center;
 }
 
+type RobustCircle = { center: Point; radius: number; residual: number; coverage: number; inliers: EdgePoint[] };
+
+function circleThrough(first: EdgePoint, second: EdgePoint, third: EdgePoint) {
+  const determinant = 2 * (first.x * (second.y - third.y) + second.x * (third.y - first.y) + third.x * (first.y - second.y));
+  if (Math.abs(determinant) < 1e-3) return undefined;
+  const firstNorm = first.x ** 2 + first.y ** 2; const secondNorm = second.x ** 2 + second.y ** 2; const thirdNorm = third.x ** 2 + third.y ** 2;
+  const center = {
+    x: (firstNorm * (second.y - third.y) + secondNorm * (third.y - first.y) + thirdNorm * (first.y - second.y)) / determinant,
+    y: (firstNorm * (third.x - second.x) + secondNorm * (first.x - third.x) + thirdNorm * (second.x - first.x)) / determinant
+  };
+  return { center, radius: Math.hypot(first.x - center.x, first.y - center.y) };
+}
+
+function solveThreeByThree(matrix: number[][], vector: number[]) {
+  const augmented = matrix.map((row, index) => [...row, vector[index]]);
+  for (let column = 0; column < 3; column += 1) {
+    let pivot = column;
+    for (let row = column + 1; row < 3; row += 1) if (Math.abs(augmented[row][column]) > Math.abs(augmented[pivot][column])) pivot = row;
+    if (Math.abs(augmented[pivot][column]) < 1e-9) return undefined;
+    [augmented[column], augmented[pivot]] = [augmented[pivot], augmented[column]];
+    const scale = augmented[column][column]; for (let index = column; index < 4; index += 1) augmented[column][index] /= scale;
+    for (let row = 0; row < 3; row += 1) if (row !== column) { const factor = augmented[row][column]; for (let index = column; index < 4; index += 1) augmented[row][index] -= factor * augmented[column][index]; }
+  }
+  return [augmented[0][3], augmented[1][3], augmented[2][3]];
+}
+
+function leastSquaresCircle(points: EdgePoint[]) {
+  const matrix = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]; const vector = [0, 0, 0];
+  for (const point of points) {
+    const row = [point.x, point.y, 1]; const target = -(point.x ** 2 + point.y ** 2);
+    for (let y = 0; y < 3; y += 1) { vector[y] += row[y] * target; for (let x = 0; x < 3; x += 1) matrix[y][x] += row[y] * row[x]; }
+  }
+  const solved = solveThreeByThree(matrix, vector); if (!solved) return undefined;
+  const center = { x: -solved[0] / 2, y: -solved[1] / 2 }; const radiusSquared = center.x ** 2 + center.y ** 2 - solved[2];
+  return radiusSquared > 0 ? { center, radius: Math.sqrt(radiusSquared) } : undefined;
+}
+
+function radialAlignment(edge: EdgePoint, center: Point) {
+  const radialAngle = (Math.atan2(edge.y - center.y, edge.x - center.x) * 180 / Math.PI + 180) % 180;
+  const difference = Math.abs(radialAngle - edge.angle); return Math.min(difference, 180 - difference);
+}
+
+function robustCircleFromEdges(edgePoints: EdgePoint[], patch: GrayPatch): RobustCircle | undefined {
+  if (edgePoints.length < 32) return undefined;
+  const maximumRadius = Math.hypot(patch.width, patch.height) * .65; let seed = 0x51f15e; let best: RobustCircle | undefined; let bestScore = -Infinity;
+  const evaluate = (center: Point, radius: number) => {
+    if (!Number.isFinite(radius) || radius < 3 || radius > maximumRadius || center.x < 1 || center.y < 1 || center.x >= patch.width - 1 || center.y >= patch.height - 1) return;
+    const tolerance = Math.max(.8, radius * .025);
+    const inliers = edgePoints.filter(edge => Math.abs(Math.hypot(edge.x - center.x, edge.y - center.y) - radius) <= tolerance && radialAlignment(edge, center) <= 28);
+    if (inliers.length < Math.max(24, edgePoints.length * .16)) return;
+    const bins = new Set(inliers.map(edge => (Math.floor((Math.atan2(edge.y - center.y, edge.x - center.x) + Math.PI) * 36 / Math.PI) + 72) % 72));
+    const quadrants = new Set(inliers.map(edge => (Math.floor((Math.atan2(edge.y - center.y, edge.x - center.x) + Math.PI) * 2 / Math.PI) + 4) % 4));
+    const coverage = bins.size / 72; if (coverage < .45 || quadrants.size < 3) return;
+    const residuals = inliers.map(edge => Math.abs(Math.hypot(edge.x - center.x, edge.y - center.y) - radius)).sort((a, b) => a - b);
+    const residual = residuals[Math.floor(residuals.length / 2)] ?? Infinity;
+    const score = inliers.length + coverage * 80 - residual * 30;
+    if (score > bestScore) { bestScore = score; best = { center, radius, residual, coverage, inliers }; }
+  };
+  const iterations = Math.min(1400, Math.max(420, edgePoints.length * 5));
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; const first = edgePoints[seed % edgePoints.length];
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; const second = edgePoints[seed % edgePoints.length];
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; const third = edgePoints[seed % edgePoints.length];
+    const candidate = circleThrough(first, second, third); if (candidate) evaluate(candidate.center, candidate.radius);
+  }
+  if (!best) return undefined;
+  let refined = best;
+  for (let iteration = 0; iteration < 3; iteration += 1) {
+    const fitted = leastSquaresCircle(refined.inliers); if (!fitted) break;
+    const previous = refined; best = undefined; bestScore = -Infinity; evaluate(fitted.center, fitted.radius);
+    refined = (best as RobustCircle | undefined) ?? previous;
+  }
+  return refined;
+}
+
 function emptyResult(intent: ExtractionIntent, roi: Roi, reason: string): FeatureRefinement {
   return { accepted: false, intent, roi, point: null, confidence: 0, residualPx: null, gates: { candidate: false }, reason, geometry: null };
 }
@@ -258,6 +333,30 @@ function circleRefinement(patch: GrayPatch, intent: ExtractionIntent, roi: Roi):
   const component = selection.component;
   const edgePoints = component?.boundary ?? edges(patch);
   if (edgePoints.length < 32) return emptyResult(intent, roi, "refinement.edge-points");
+  const initialEllipse = component ? estimateEllipseFromEdges(edgePoints, component.center) : undefined;
+  const initialEllipseResidual = initialEllipse ? ellipseEdgeResidual(edgePoints, component!.center, initialEllipse.major, initialEllipse.minor, initialEllipse.angleDeg) : Infinity;
+  const needsOcclusionFallback = !initialEllipse || initialEllipseResidual > Math.max(.75, .02 * initialEllipse.minor);
+  const robustCircle = needsOcclusionFallback ? robustCircleFromEdges(edgePoints, patch) : undefined;
+  if (robustCircle && robustCircle.coverage >= .5) {
+    let center = robustCircle.center; let radius = robustCircle.radius; let inliers = robustCircle.inliers;
+    const radialCenter = refineRadialCenter(patch, center, { major: radius * 2, minor: radius * 2, angleDeg: 0 });
+    if (radialCenter && Math.hypot(radialCenter.x - center.x, radialCenter.y - center.y) <= .6) {
+      const radialDistances = inliers.map(edge => Math.hypot(edge.x - radialCenter.x, edge.y - radialCenter.y)).sort((a, b) => a - b);
+      const radialRadius = radialDistances[Math.floor(radialDistances.length / 2)] ?? radius;
+      const before = inliers.map(edge => Math.abs(Math.hypot(edge.x - center.x, edge.y - center.y) - radius)).sort((a, b) => a - b)[Math.floor(inliers.length / 2)] ?? Infinity;
+      const after = radialDistances.map(distance => Math.abs(distance - radialRadius)).sort((a, b) => a - b)[Math.floor(radialDistances.length / 2)] ?? Infinity;
+      if (after <= before) { center = radialCenter; radius = radialRadius; }
+    }
+    const radialResiduals = inliers.map(edge => Math.abs(Math.hypot(edge.x - center.x, edge.y - center.y) - radius)).sort((a, b) => a - b);
+    const residual = radialResiduals[Math.floor(radialResiduals.length / 2)] ?? Infinity;
+    const touchesBoundary = inliers.some(edge => edge.x <= 1 || edge.y <= 1 || edge.x >= patch.width - 2 || edge.y >= patch.height - 2);
+    const gates = { edgeCoverage: robustCircle.coverage >= .5, edgePoints: inliers.length >= 24, axisRatio: true, residual: residual <= Math.max(.75, .04 * radius), roiBoundary: !touchesBoundary, occlusionRobust: true };
+    const accepted = Object.values(gates).every(Boolean); const point = globalPoint(roi, center);
+    if (accepted) {
+      const geometry: RefinementGeometry = { kind: "ellipse", center: point, majorAxis: radius * 2, minorAxis: radius * 2, angleDeg: 0, edgeCoverage: robustCircle.coverage, inlierCount: inliers.length };
+      return { accepted: true, intent, roi, point, confidence: Math.max(0, Math.min(1, robustCircle.coverage * Math.exp(-residual))), residualPx: residual, gates, reason: null, geometry };
+    }
+  }
   const cv = openCv();
   if (cv?.fitEllipse || cv?.fitEllipseAMS) {
     try {

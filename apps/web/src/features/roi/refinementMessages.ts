@@ -3,7 +3,7 @@ import type { ExtractionIntent } from "@subpixel/contracts";
 const messages: Record<string, string> = {
   residual: "圆轮廓残差过大。请缩小 ROI，避免包含相邻圆或背景纹理。",
   roiBoundary: "目标轮廓触碰 ROI 边界。请扩大或移动 ROI，让目标四周留出背景。",
-  edgeCoverage: "有效轮廓覆盖不足。请调整 ROI，保留完整目标边缘。",
+  edgeCoverage: "可用圆弧覆盖不足。局部遮挡可自动处理；若仅剩短弧，请扩大或移动 ROI 以露出更多圆周。",
   edgePoints: "有效边缘点不足。请扩大 ROI 或选择对比度更清晰的目标。",
   "refinement.edge-points": "有效边缘点不足。请扩大 ROI 或选择对比度更清晰的目标。",
   "refinement.circle-ambiguous": "ROI 内检测到多个同样显著的圆。请移动或缩小 ROI，让目标圆更靠近 ROI 中心。",

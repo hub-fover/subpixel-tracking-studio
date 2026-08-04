@@ -69,6 +69,7 @@ test("a real circular target can be refined and confirmed", async ({ page }) => 
   await expect(page.locator('[data-point-id="p-001"]').first()).toBeVisible();
   await expect(page.locator(".roi-overlay ellipse.overlay-geometry")).toBeVisible();
   await expect(page.locator('.roi-overlay text', { hasText: "p-001" })).toBeVisible();
+  if (process.env.CIRCLE_QA_SCREENSHOT) await page.screenshot({ path: process.env.CIRCLE_QA_SCREENSHOT });
 });
 
 test("natural feature selection exposes candidate quality guidance", async ({ page }) => {

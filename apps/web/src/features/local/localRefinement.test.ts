@@ -24,6 +24,16 @@ function ringPatch(width = 61, height = 61, cx = 30.35, cy = 29.65) : GrayPatch 
   return { width, height, data };
 }
 
+function occludePatch(patch: GrayPatch, rectangle: { x: number; y: number; width: number; height: number }, value = 74): GrayPatch {
+  const data = new Float32Array(patch.data);
+  for (let y = rectangle.y; y < rectangle.y + rectangle.height; y += 1) for (let x = rectangle.x; x < rectangle.x + rectangle.width; x += 1) {
+    if (x >= 0 && y >= 0 && x < patch.width && y < patch.height) data[y * patch.width + x] = value + 8 * Math.sin(x * .7 + y * .3);
+  }
+  return { ...patch, data };
+}
+
+function invertPatch(patch: GrayPatch): GrayPatch { return { ...patch, data: Float32Array.from(patch.data, value => 255 - value) }; }
+
 function texturedAdjacentCirclePatch(width = 89, height = 100, cx = 44.35, cy = 49.65, radius = 34): GrayPatch {
   const data = new Float32Array(width * height);
   for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
@@ -114,6 +124,35 @@ describe("local refinement", () => {
     expect(result.residualPx).not.toBeNull();
     expect(result.residualPx!).toBeLessThanOrEqual(Math.max(.75, .02 * 36));
     expect(Math.hypot(result.point!.x - 110.35, result.point!.y - 149.65), JSON.stringify(result)).toBeLessThan(.1);
+  });
+
+  it("keeps the subpixel center when a solid circle is locally occluded", () => {
+    const patch = occludePatch(circlePatch(81, 77, 39.35, 38.65, 24), { x: 39, y: 11, width: 35, height: 25 });
+    const result = refineLocalPatch(patch, "circle-center", { x: 400, y: 600, width: 81, height: 77 });
+    expect(result.accepted, JSON.stringify(result)).toBe(true);
+    expect(Math.hypot(result.point!.x - 439.35, result.point!.y - 638.65), JSON.stringify(result)).toBeLessThan(.15);
+    expect(result.geometry?.kind).toBe("ellipse");
+  });
+
+  it("keeps a ring center with a large missing arc and occluder edges", () => {
+    const patch = occludePatch(ringPatch(91, 87, 44.35, 43.65), { x: 43, y: 17, width: 43, height: 29 }, 96);
+    const result = refineLocalPatch(patch, "circle-center", { x: 1000, y: 2000, width: 91, height: 87 });
+    expect(result.accepted, JSON.stringify(result)).toBe(true);
+    expect(Math.hypot(result.point!.x - 1044.35, result.point!.y - 2043.65), JSON.stringify(result)).toBeLessThan(.2);
+  });
+
+  it("supports an occluded dark circle on a bright background", () => {
+    const patch = invertPatch(occludePatch(circlePatch(81, 77, 39.35, 38.65, 24), { x: 39, y: 11, width: 35, height: 25 }));
+    const result = refineLocalPatch(patch, "circle-center", { x: 0, y: 0, width: 81, height: 77 });
+    expect(result.accepted, JSON.stringify(result)).toBe(true);
+    expect(Math.hypot(result.point!.x - 39.35, result.point!.y - 38.65), JSON.stringify(result)).toBeLessThan(.15);
+  });
+
+  it("rejects a short visible arc instead of guessing a circle center", () => {
+    const patch = occludePatch(circlePatch(81, 77, 39.35, 38.65, 24), { x: 17, y: 0, width: 64, height: 77 });
+    const result = refineLocalPatch(patch, "circle-center", { x: 0, y: 0, width: 81, height: 77 });
+    expect(result.accepted).toBe(false);
+    expect(result.point).toBeNull();
   });
 
   it("isolates the centered circle from textured background and an adjacent circle", () => {
