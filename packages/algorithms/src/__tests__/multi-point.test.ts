@@ -61,6 +61,19 @@ describe("multi-point primitives", () => {
     expect(result.paused).toBe(true);
   });
 
+  it("applies an updated automatic-pause threshold before the next frame", () => {
+    const seeds: PointSeed[] = Array.from({ length: 5 }, (_, index) => ({
+      pointId: `p-${index}`, click: { x: index, y: 1 }, snapped: { x: index, y: 1 },
+      roi: { x: index, y: 0, width: 9, height: 9 }, groupId: "target", candidateScore: .9, model: "circle"
+    }));
+    const tracker = createMultiPointTracker(seeds); tracker.initialize(); tracker.setPauseLostRatio(.35);
+    const result = tracker.process(seeds.map((seed, index) => ({
+      pointId: seed.pointId, predicted: seed.snapped, refined: seed.snapped, confidence: index === 0 ? .2 : .9, residual: .1
+    })));
+    expect(result.invalidRatio).toBe(.2);
+    expect(result.paused).toBe(false);
+  });
+
   it("keeps successful point observations as provisional when registration only has a soft quality failure", () => {
     const seeds: PointSeed[] = Array.from({ length: 5 }, (_, index) => ({
       pointId: `p-${index}`,

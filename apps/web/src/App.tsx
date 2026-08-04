@@ -17,7 +17,8 @@ import { captureRecoverySnapshot, restoreRecoverySnapshot, type RecoverySnapshot
 import { composeRegistrationGuidance, reconcileRegistrationGuidance, type RegistrationGuidance } from "./features/local/localRegistration";
 import { registrationRisk, trackingGateRisk } from "./features/local/riskNotice";
 import { processCompleteOfflineSequence } from "./features/capture/offlineSequence";
-import { moveReviewFrame, tracksForFrame } from "./features/tracking/reviewState";
+import { moveReviewFrame, nextPendingPointId, tracksForFrame } from "./features/tracking/reviewState";
+import { loadAlertSettings, normalizeAlertSettings, saveAlertSettings, shouldWarnForRegistration, shouldWarnForTrack, type AlertSettings } from "./features/tracking/alertSettings";
 
 const defaultIntent: ExtractionIntent = "circle-center";
 
@@ -77,6 +78,9 @@ export function App() {
   const [reviewLoading, setReviewLoading] = useState(false);
   const [selectedPointId, setSelectedPointId] = useState<string>();
   const [reinitializing, setReinitializing] = useState<{ pointId: string; frame: number }>();
+  const [pendingReviewAdvance, setPendingReviewAdvance] = useState<{ pointId: string; frame: number }>();
+  const [alertSettings, setAlertSettings] = useState<AlertSettings>(() => loadAlertSettings(typeof window === "undefined" ? undefined : window.localStorage));
+  const alertSettingsRef = useRef(alertSettings);
   const seedsRef = useRef<PointSeed[]>([]);
   const trackerRef = useRef<ReturnType<typeof createMultiPointTracker>>();
   const templatesRef = useRef(new Map<string, GrayPatch>());
@@ -118,6 +122,12 @@ export function App() {
 
   useEffect(() => { seedsRef.current = pointState.seeds; }, [pointState.seeds]);
   useEffect(() => { runningRef.current = running; }, [running]);
+  useEffect(() => { alertSettingsRef.current = alertSettings; }, [alertSettings]);
+  useEffect(() => {
+    if (!pendingReviewAdvance) return;
+    setSelectedPointId(nextPendingPointId(pointState.seeds, flattenTracks(pointState), pendingReviewAdvance.frame, pendingReviewAdvance.pointId) ?? pendingReviewAdvance.pointId);
+    setPendingReviewAdvance(undefined);
+  }, [pointState, pendingReviewAdvance]);
   useEffect(() => { localWorkerRef.current = new LocalWorkerClient(); return () => localWorkerRef.current?.dispose(); }, []);
   useEffect(() => () => { cameraTokenRef.current += 1; cameraSourceRef.current?.stop(); selectedFilePreviewRef.current?.release?.(); recorderRef.current?.stop(); releaseRefinementImage(); if (undoTimerRef.current) window.clearTimeout(undoTimerRef.current); const previous = displayedImageRef.current; if (previous && "close" in previous) (previous as ImageBitmap).close(); }, []);
   useEffect(() => { if (image && image !== displayedImageRef.current) { const previous = displayedImageRef.current; displayedImageRef.current = image; const initialImage = referenceFrameRef.current?.image; const keyframeImage = keyframeFrameRef.current?.image; const adjacentImage = previousTrackingFrameRef.current?.image; const rollbackImage = recoveryKeyframeFrameSnapshotRef.current?.image; if (previous && previous !== initialImage && previous !== keyframeImage && previous !== adjacentImage && previous !== rollbackImage && "close" in previous) (previous as ImageBitmap).close(); } }, [image]);
@@ -207,11 +217,11 @@ export function App() {
     }
     const runMode = input.runMode ?? (frame.source === "camera" ? "live" : "offline");
     const result = engineRef.current.track(frame, seedsRef.current, { templates: templatesRef.current, positions: positionsRef.current, previousSearches: previousSearchesRef.current, referencePositions: referencePositionsRef.current, registration, runMode, tracker });
-    result.tracks.filter(track => track.state === "lost" || track.state === "suspect").forEach(track => {
+    result.tracks.filter(track => shouldWarnForTrack(track, alertSettingsRef.current)).forEach(track => {
       const risk = trackingGateRisk(track.pointId, track.gateFailures);
       addRisk({ ...risk, severity: track.state === "lost" ? "error" : risk.severity, frame: frame.frame, pointId: track.pointId });
     });
-    if (registration?.decision === "rejected" || registration?.accepted === false) addRisk({ ...registrationRisk(registration.reason), frame: frame.frame });
+    if (registration && (registration.decision === "rejected" || registration.accepted === false) && shouldWarnForRegistration(registration, alertSettingsRef.current)) addRisk({ ...registrationRisk(registration.reason), frame: frame.frame });
     result.tracks.filter(track => track.state === "valid" || track.state === "provisional").forEach(track => positionsRef.current.set(track.pointId, track.refined));
     const validCount = result.tracks.filter(track => track.state === "valid").length;
     const provisionalCount = result.tracks.filter(track => track.state === "provisional").length;
@@ -276,7 +286,7 @@ export function App() {
 
   const initializeTrackingFor = (baseImage: CanvasImageSource, size: { width: number; height: number }, source: BrowserFrame["source"]) => {
     if (!seedsRef.current.length) return false;
-    trackerRef.current = createMultiPointTracker(seedsRef.current); trackerRef.current.initialize();
+    trackerRef.current = createMultiPointTracker(seedsRef.current, { pauseLostRatio: alertSettingsRef.current.pauseInvalidRatio }); trackerRef.current.initialize();
     templatesRef.current = new Map(seedsRef.current.map(seed => [seed.pointId, extractNativePatch(baseImage, trackingTemplateRoi(seed, size))]));
     initialTemplatesRef.current = new Map(templatesRef.current);
     previousSearchesRef.current = new Map(seedsRef.current.map(seed => {
@@ -579,6 +589,7 @@ export function App() {
       }
       addEvent({ id: `manual-review-${refinedSeed.pointId}-${reinitializing.frame}-${Date.now()}`, frame: reinitializing.frame, kind: "reviewed", message: `${refinedSeed.pointId} 已通过手动 ROI 重新亚像素定位`, recoverable: true });
       setSelectedPointId(refinedSeed.pointId);
+      if (pointState.frameLedger.length) setPendingReviewAdvance({ pointId: refinedSeed.pointId, frame: reinitializing.frame });
       setReinitializing(undefined);
       refinementTokenRef.current += 1; releaseRefinementImage(); cameraPreviewFrozenRef.current = false; setDraft(undefined);
       setMode(pointState.frameLedger.length ? "review" : "annotate");
@@ -709,8 +720,18 @@ export function App() {
   const allTracks = flattenTracks(pointState);
   const latestTracks = [...pointState.tracksByPoint.values()].map(items => items.at(-1)).filter((track): track is MultiPointTrack => Boolean(track));
   const displayedTracks = mode === "review" ? tracksForFrame(allTracks, reviewFrame) : latestTracks;
+  const updateAlertSettings = (input: AlertSettings) => {
+    const next = normalizeAlertSettings(input);
+    alertSettingsRef.current = next;
+    trackerRef.current?.setPauseLostRatio(next.pauseInvalidRatio);
+    setAlertSettings(next);
+    saveAlertSettings(typeof window === "undefined" ? undefined : window.localStorage, next);
+    setPointState(state => clearRiskNotices(state, notice => notice.code === "tracking.identity-gate-failed" || notice.code === "registration.rejected"));
+  };
   const reviewDecision = (pointId: string, frame: number, decision: "accept" | "reject") => {
-    setPointState(state => setTrackReviewDecision(state, pointId, frame, decision));
+    const updated = setTrackReviewDecision(pointState, pointId, frame, decision);
+    setPointState(updated);
+    if (decision === "accept") setPendingReviewAdvance({ pointId, frame });
     addEvent({ id: `review-${decision}-${pointId}-${frame}-${Date.now()}`, frame, kind: "reviewed", message: `${pointId} ${decision === "accept" ? "确认正确" : "标记异常"}`, recoverable: decision === "reject" });
   };
   const changeMode = (next: CanvasMode) => {
@@ -743,6 +764,7 @@ export function App() {
       onMoveReviewFrame={direction => void selectReviewFrame(moveReviewFrame(pointState.frameLedger, reviewFrame, direction))}
       onToggleReviewPlayback={() => setReviewPlaying(value => !value)}
       onReviewDecision={reviewDecision}
+      alertSettings={alertSettings} onAlertSettingsChange={updateAlertSettings}
       recoveryPaused={recoveryPaused} recoveryUndoAvailable={recoveryUndoAvailable}
       onApplyRecovery={applyRecovery} onRollbackRecovery={rollbackRecovery}
       onOpenCamera={() => void openCamera()} cameraActive={cameraActive} cameraSession={cameraSession}

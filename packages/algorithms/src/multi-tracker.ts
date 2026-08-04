@@ -36,7 +36,7 @@ export type MultiPointProcessingPolicy = {
 };
 
 export function createMultiPointTracker(seeds: PointSeed[], options: { pauseLostRatio?: number } = {}) {
-  const pauseLostRatio = options.pauseLostRatio ?? 0.2;
+  let pauseLostRatio = options.pauseLostRatio ?? 0.2;
   let frame = 0;
   let previous = new Map<string, { x: number; y: number }>();
   let paused = false;
@@ -112,6 +112,9 @@ export function createMultiPointTracker(seeds: PointSeed[], options: { pauseLost
         if (affine?.accepted) { const propagated = applyLocalAffine(seed.snapped, reliable); if (propagated.accepted) previous.set(seed.pointId, propagated.point); }
       }
       paused = false;
+    },
+    setPauseLostRatio(value: number) {
+      if (Number.isFinite(value)) pauseLostRatio = Math.max(0.1, Math.min(0.6, value));
     },
     reset() { frame = 0; paused = false; previous.clear(); },
     get paused() { return paused; }

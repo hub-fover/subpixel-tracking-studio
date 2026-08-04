@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { FrameLedgerEntry, MultiPointTrack, PointSeed } from "@subpixel/contracts";
-import { buildFrameReviewRows, moveReviewFrame, tracksForFrame } from "./reviewState";
+import { buildFrameReviewRows, moveReviewFrame, nextPendingPointId, tracksForFrame } from "./reviewState";
 import { appendFrameLedgerEntry, appendTracks, createPointSetState, setTrackReviewDecision } from "./pointSetState";
 
 const seed = (pointId: string): PointSeed => ({
@@ -52,5 +52,13 @@ describe("frame review state", () => {
     expect(state.tracksByPoint.get("p-001")?.[0].state).toBe("reviewed");
     expect(state.tracksByPoint.get("p-002")?.[0].state).toBe("suspect");
     expect(state.frameLedger[0]).toMatchObject({ validCount: 1, provisionalCount: 0, suspectCount: 1, missingCount: 0 });
+  });
+
+  it("selects the next pending point after a manual confirmation and wraps once", () => {
+    const seeds = [seed("p-001"), seed("p-002"), seed("p-003"), seed("p-004")];
+    const tracks = [track("p-001", 2, "reviewed"), track("p-002", 2, "valid"), track("p-003", 2, "provisional")];
+    expect(nextPendingPointId(seeds, tracks, 2, "p-001")).toBe("p-003");
+    expect(nextPendingPointId(seeds, tracks, 2, "p-003")).toBe("p-004");
+    expect(nextPendingPointId(seeds, [...tracks, track("p-004", 2, "reviewed")], 2, "p-003")).toBeUndefined();
   });
 });

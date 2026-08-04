@@ -18,3 +18,11 @@ export function moveReviewFrame(ledger: FrameLedgerEntry[], current: number, dir
   if (index < 0) return direction > 0 ? frames.find(frame => frame > current) ?? frames.at(-1)! : [...frames].reverse().find(frame => frame < current) ?? frames[0];
   return frames[Math.max(0, Math.min(frames.length - 1, index + direction))];
 }
+
+export function nextPendingPointId(seeds: PointSeed[], tracks: MultiPointTrack[], frame: number, currentPointId: string): string | undefined {
+  const rows = buildFrameReviewRows(seeds, tracks, frame);
+  if (!rows.length) return undefined;
+  const currentIndex = Math.max(0, rows.findIndex(row => row.pointId === currentPointId));
+  const ordered = [...rows.slice(currentIndex + 1), ...rows.slice(0, currentIndex)];
+  return ordered.find(row => !row.track || row.track.state === "provisional" || row.track.state === "suspect" || row.track.state === "lost" || row.track.state === "paused")?.pointId;
+}

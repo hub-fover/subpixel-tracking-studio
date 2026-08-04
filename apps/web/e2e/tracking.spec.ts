@@ -37,6 +37,22 @@ test("accepted ROI can be confirmed and renders a center crosshair", async ({ pa
   await expect(page.locator(".seed-row strong", { hasText: "p-001" })).toBeVisible(); await expect(page.locator(".seed-row")).toHaveCount(1);
 });
 
+test("warning sensitivity profiles and custom thresholds persist", async ({ page }) => {
+  await page.goto("/");
+  const panel = page.locator('[data-testid="alert-settings"]:visible');
+  await expect(panel).toBeVisible();
+  await panel.getByRole("button", { name: "宽松" }).click();
+  await expect(panel.getByLabel("点质量提示阈值")).toHaveValue("20");
+  await expect(panel.getByLabel("配准误差提示阈值")).toHaveValue("6");
+  await expect(panel.getByLabel("失锁自动暂停阈值")).toHaveValue("35");
+  await panel.getByLabel("点质量提示阈值").fill("25");
+  await expect(panel).toContainText("自定义");
+  await page.reload();
+  const reloaded = page.locator('[data-testid="alert-settings"]:visible');
+  await expect(reloaded.getByLabel("点质量提示阈值")).toHaveValue("25");
+  await expect(reloaded).toContainText("自定义");
+});
+
 test("a real circular target can be refined and confirmed", async ({ page }) => {
   test.setTimeout(45_000);
   await page.goto("/");
