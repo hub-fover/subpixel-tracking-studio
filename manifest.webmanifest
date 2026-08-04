@@ -1,0 +1,10 @@
+{
+  "name": "Subpixel Tracking Studio",
+  "short_name": "Subpixel Studio",
+  "start_url": "/subpixel-tracking-studio/",
+  "scope": "/subpixel-tracking-studio/",
+  "display": "standalone",
+  "background_color": "#eef1f3",
+  "theme_color": "#151b20",
+  "description": "Local native-resolution camera and subpixel feature tracking."
+}
